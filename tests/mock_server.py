@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger("DeepSeekProxy")
 
 SILICON_FLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-SILICON_FLOW_API_KEY = os.getenv("SILICON_FLOW_API_KEY", "sk-your-siliconflow-key-here")
+SILICON_FLOW_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 MODEL_MAPPING = {
     "deepseek-v3": "deepseek-ai/DeepSeek-V3",
@@ -116,7 +116,7 @@ class GenerationRequest(BaseModel):
 class DeepSeekProxy:
     def __init__(self):
         self.client = OpenAI(
-            api_key=SILICON_FLOW_API_KEY,
+            api_key=SILICON_FLOW_API_KEY if SILICON_FLOW_API_KEY else None,
             base_url=SILICON_FLOW_BASE_URL
         )
 
@@ -343,6 +343,22 @@ def create_app() -> FastAPI:
             SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
             logger.info(f"{request.method} {request.url.path} - {duration:.2f}ms")
+
+    # --- [New Endpoint] Health Check ---
+    @app.get("/health_check")
+    async def health_check():
+        """
+        Liveness probe verifying server status and current mode.
+        """
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "healthy",
+                "service": "DeepSeek-DashScope-Proxy",
+                "timestamp": time.time(),
+                "mode": "mock" if SERVER_STATE.is_mock_mode else "production"
+            }
+        )
 
     @app.post("/api/v1/services/aigc/text-generation/generation")
     async def generation(request: Request, body: GenerationRequest = None):
