@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any, Union, AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -67,7 +67,6 @@ class ServerState:
         with self.lock:
             self.active_requests -= 1
 
-    # [FIX 1] 添加线程安全的快照读取，确保并发状态一致性
     @property
     def snapshot(self):
         """Returns a consistent snapshot of the state."""
@@ -101,9 +100,7 @@ class Parameters(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     enable_thinking: bool = False
     thinking_budget: Optional[int] = None
-    # [ADDED] Tools Support
     tools: Optional[List[Dict[str, Any]]] = None
-    # Allowed: "none", "auto", "required" (str) OR {"type": "function", ...} (dict)
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
 class GenerationRequest(BaseModel):
@@ -139,23 +136,15 @@ class DeepSeekProxy:
             messages.append({"role": "user", "content": input_data.prompt})
         return messages
 
-    async def generate(self, req_data: GenerationRequest, request_id: str):
-        """
-        Standard generation logic with strict invariant checks.
-        """
+    async def generate(self, req_data: GenerationRequest, initial_request_id: str):
         params = req_data.parameters
 
-        # --- [Invariant Checks] ---
-        # 1. Format Constraint (Predicate A)
         if params.tools and params.result_format != "message":
             return JSONResponse(
                 status_code=400,
                 content={"code": "InvalidParameter", "message": "When 'tools' are provided, 'result_format' must be 'message'."}
             )
 
-        # 2. R1 Orthogonality (Predicate B)
-        # DeepSeek R1 Thinking Mode is mutually exclusive with FORCED SPECIFIC tool choice (Dict).
-        # However, abstract constraints like "required" (String) are allowed.
         is_r1 = "deepseek-r1" in req_data.model or params.enable_thinking
         if is_r1 and params.tool_choice and isinstance(params.tool_choice, dict):
              return JSONResponse(
@@ -174,11 +163,9 @@ class DeepSeekProxy:
             "stream": params.incremental_output or params.enable_thinking,
         }
 
-        # [ADDED] Pass tools to upstream if present
         if params.tools:
             openai_params["tools"] = params.tools
             if params.tool_choice:
-                # This will pass "required" (str) effectively to OpenAI/SiliconFlow
                 openai_params["tool_choice"] = params.tool_choice
 
         if params.max_tokens: openai_params["max_tokens"] = params.max_tokens
@@ -187,13 +174,17 @@ class DeepSeekProxy:
 
         try:
             if openai_params["stream"]:
+                # Fetch raw response for headers in stream mode
+                raw_resp = self.client.chat.completions.with_raw_response.create(**openai_params)
+                trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
                 return StreamingResponse(
-                    self._stream_generator(openai_params, request_id),
+                    self._stream_generator(raw_resp.parse(), trace_id),
                     media_type="text/event-stream"
                 )
             else:
-                completion = self.client.chat.completions.create(**openai_params)
-                return self._format_unary_response(completion, request_id)
+                raw_resp = self.client.chat.completions.with_raw_response.create(**openai_params)
+                trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
+                return self._format_unary_response(raw_resp.parse(), trace_id)
 
         except APIError as e:
             logger.error(f"Upstream API Error: {str(e)}")
@@ -203,20 +194,10 @@ class DeepSeekProxy:
 
             return JSONResponse(
                 status_code=e.status_code or 500,
-                content={"code": error_code, "message": str(e), "request_id": request_id}
+                content={"code": error_code, "message": str(e), "request_id": initial_request_id}
             )
 
-    async def _stream_generator(self, openai_params: Dict, request_id: str) -> AsyncGenerator[str, None]:
-        if "stream_options" not in openai_params:
-             openai_params["stream_options"] = {"include_usage": True}
-
-        try:
-            stream = self.client.chat.completions.create(**openai_params)
-        except Exception as e:
-            logger.error(f"Stream creation failed: {e}")
-            yield f"data: {json.dumps({'code': 'StreamError', 'message': str(e)}, ensure_ascii=False)}\n\n"
-            return
-
+    async def _stream_generator(self, stream, request_id: str) -> AsyncGenerator[str, None]:
         accumulated_usage = {
             "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
             "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0}
@@ -234,34 +215,21 @@ class DeepSeekProxy:
                     accumulated_usage["output_tokens_details"]["text_tokens"] = accumulated_usage["output_tokens"] - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
 
             delta = chunk.choices[0].delta if chunk.choices else None
-
             content = delta.content if delta and delta.content else ""
             reasoning = getattr(delta, "reasoning_content", "") if delta else ""
 
             tool_calls = None
             if delta and delta.tool_calls:
-                # Forward the raw list of tool call chunks
-                # Note: model_dump() is retained per original design, ensuring Pydantic serialization
                 tool_calls = [tc.model_dump() for tc in delta.tool_calls]
 
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            message_body = {
-                "role": "assistant",
-                "content": content,
-                "reasoning_content": reasoning
-            }
-            if tool_calls:
-                message_body["tool_calls"] = tool_calls
+            message_body = {"role": "assistant", "content": content, "reasoning_content": reasoning}
+            if tool_calls: message_body["tool_calls"] = tool_calls
 
             response_body = {
-                "output": {
-                    "choices": [{
-                        "message": message_body,
-                        "finish_reason": finish_reason
-                    }]
-                },
+                "output": {"choices": [{"message": message_body, "finish_reason": finish_reason}]},
                 "usage": accumulated_usage,
                 "request_id": request_id
             }
@@ -271,12 +239,11 @@ class DeepSeekProxy:
     def _format_unary_response(self, completion, request_id: str):
         choice = completion.choices[0]
         msg = choice.message
-
         usage_data = {
             "total_tokens": completion.usage.total_tokens,
             "input_tokens": completion.usage.prompt_tokens,
             "output_tokens": completion.usage.completion_tokens,
-             "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0}
+            "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0}
         }
         details = getattr(completion.usage, "completion_tokens_details", None)
         if details:
@@ -292,12 +259,7 @@ class DeepSeekProxy:
             message_body["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
 
         response_body = {
-            "output": {
-                "choices": [{
-                    "message": message_body,
-                    "finish_reason": choice.finish_reason
-                }]
-            },
+            "output": {"choices": [{"message": message_body, "finish_reason": choice.finish_reason}]},
             "usage": usage_data,
             "request_id": request_id
         }
@@ -311,15 +273,12 @@ async def lifespan(app: FastAPI):
     def epoch_clock():
         while not stop_event.is_set():
             time.sleep(2)
-
-            # [FIX 1 Usage & FIX 2] 使用快照读取状态，并将日志级别改为 INFO
             state = SERVER_STATE.snapshot
             if state["active_requests"] > 0 or state["is_mock_mode"]:
                  logger.info(
                     f"[Epoch Clock] Active Requests: {state['active_requests']} | "
                     f"Mode: {'MOCK' if state['is_mock_mode'] else 'PROXY'}"
                 )
-
     monitor_thread = threading.Thread(target=epoch_clock, daemon=True)
     monitor_thread.start()
     yield
@@ -344,12 +303,8 @@ def create_app() -> FastAPI:
             duration = (time.time() - start_time) * 1000
             logger.info(f"{request.method} {request.url.path} - {duration:.2f}ms")
 
-    # --- [New Endpoint] Health Check ---
     @app.get("/health_check")
     async def health_check():
-        """
-        Liveness probe verifying server status and current mode.
-        """
         return JSONResponse(
             status_code=200,
             content={
@@ -372,21 +327,11 @@ def create_app() -> FastAPI:
                 if not SERVER_STATE.is_mock_mode:
                     raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
-        # === [Logic Branch]: Mock Mode with Shadow Verification ===
         if SERVER_STATE.is_mock_mode:
             if body:
-                logger.info(f"[Shadow] Validating request against upstream: {body.model_dump_json(exclude_none=True)}")
+                logger.info(f"[Shadow] Validating request against upstream...")
                 try:
-                    shadow_resp = await proxy.generate(body, f"shadow-{request_id}")
-                    if isinstance(shadow_resp, StreamingResponse):
-                        async for _ in shadow_resp.body_iterator: pass
-                        logger.info("[Shadow] Upstream stream validation: PASSED")
-                    elif isinstance(shadow_resp, JSONResponse):
-                        status = shadow_resp.status_code
-                        if 200 <= status < 300:
-                            logger.info(f"[Shadow] Upstream unary validation: PASSED (Status {status})")
-                        else:
-                            logger.warning(f"[Shadow] Upstream validation FAILED (Status {status})")
+                    await proxy.generate(body, f"shadow-{request_id}")
                 except Exception as e:
                     logger.error(f"[Shadow] Validation Exception: {str(e)}")
 
@@ -394,17 +339,13 @@ def create_app() -> FastAPI:
                 raw_body = await request.json()
                 SERVER_STATE.request_queue.put(raw_body)
                 response_data = SERVER_STATE.response_queue.get(timeout=10)
-                if isinstance(response_data, str):
-                    response_json = json.loads(response_data)
-                else:
-                    response_json = response_data
+                response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
                 logger.critical(f"[Mock] DEADLOCK/ERROR: {e}")
                 return JSONResponse(status_code=500, content={"code": "MockError", "message": f"Mock Server Error: {str(e)}"})
 
-        # === [Logic Branch]: Production Proxy Mode ===
         return await proxy.generate(body, request_id)
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
@@ -413,21 +354,12 @@ def create_app() -> FastAPI:
             try:
                 body = None
                 if request.method in ["POST", "PUT"]:
-                    try:
-                        body = await request.json()
+                    try: body = await request.json()
                     except: pass
-                req_record = {
-                    "path": f"/{path_name}",
-                    "method": request.method,
-                    "headers": dict(request.headers),
-                    "body": body
-                }
+                req_record = {"path": f"/{path_name}", "method": request.method, "headers": dict(request.headers), "body": body}
                 SERVER_STATE.request_queue.put(req_record)
                 response_data = SERVER_STATE.response_queue.get(timeout=5)
-                if isinstance(response_data, str):
-                    response_json = json.loads(response_data)
-                else:
-                    response_json = response_data
+                response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
@@ -451,21 +383,16 @@ class MockServer:
 
 def create_mock_server(*args, **kwargs):
     mock_server = MockServer()
-    proc = multiprocessing.Process(
-        target=run_server_process,
-        args=(mock_server.requests, mock_server.responses, "0.0.0.0", 8089)
-    )
+    proc = multiprocessing.Process(target=run_server_process, args=(mock_server.requests, mock_server.responses, "0.0.0.0", 8089))
     proc.start()
     mock_server.proc = proc
     time.sleep(1.5)
     logger.info("Mock Server (Proxy Mode) started on port 8089")
-
     if args and hasattr(args[0], "addfinalizer"):
         def stop_server():
             if proc.is_alive():
                 proc.terminate()
                 proc.join()
-            logger.info("Mock Server stopped")
         args[0].addfinalizer(stop_server)
     return mock_server
 
