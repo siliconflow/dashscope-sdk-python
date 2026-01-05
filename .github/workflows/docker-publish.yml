@@ -11,7 +11,7 @@ on:
     types: [published]
 
 concurrency:
-  group: docker-blobcache-${{ github.ref }}
+  group: docker-dashscope-proxy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -56,7 +56,7 @@ jobs:
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            hub.6scloud.com/d1r7umcsfi9c73b4drdg/blobcache:latest
-            hub.6scloud.com/d1r7umcsfi9c73b4drdg/blobcache:${{ steps.get_version.outputs.version }}
+            hub.6scloud.com/d1r7umcsfi9c73b4drdg/dashscope-proxy:latest
+            hub.6scloud.com/d1r7umcsfi9c73b4drdg/dashscope-proxy:${{ steps.get_version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
