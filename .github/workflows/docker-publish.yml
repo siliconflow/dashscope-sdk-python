@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build_image:
-    name: Push Docker image to hub.6scloud.com
+    name: Push Docker image
     runs-on: ubuntu-latest
     # 保持原有的权限检查，如果不是在该 organization 下运行请移除此行
     if: github.repository_owner == 'siliconflow'
@@ -55,7 +55,7 @@ jobs:
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            hub.6scloud.com/caishenghang/dashscope-proxy:latest
-            hub.6scloud.com/caishenghang/dashscope-proxy:${{ steps.get_version.outputs.version }}
+            caishenghang/dashscope-proxy:latest
+            caishenghang/dashscope-proxy:${{ steps.get_version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
