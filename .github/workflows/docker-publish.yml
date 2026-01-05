@@ -28,9 +28,8 @@ jobs:
       - name: Login to Docker Registry
         uses: docker/login-action@v3
         with:
-          registry: hub.6scloud.com
-          username: ${{ secrets.HUB_6S_CLOUD_USERNAME }}
-          password: ${{ secrets.HUB_6S_CLOUD_TOKEN }}
+          username: caishenghang
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -56,7 +55,7 @@ jobs:
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            hub.6scloud.com/d1r7umcsfi9c73b4drdg/dashscope-proxy:latest
-            hub.6scloud.com/d1r7umcsfi9c73b4drdg/dashscope-proxy:${{ steps.get_version.outputs.version }}
+            hub.6scloud.com/caishenghang/dashscope-proxy:latest
+            hub.6scloud.com/caishenghang/dashscope-proxy:${{ steps.get_version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
