@@ -12,7 +12,7 @@ COPY pyproject.toml uv.lock ./
 
 # 导出依赖并安装到系统路径（或使用虚拟环境）
 # --system 标志允许直接安装在镜像的 Python 环境中，适合容器场景
-RUN uv sync --frozen --no-dev --system
+RUN uv sync --frozen --no-dev
 
 # 最终镜像
 FROM python:3.11-slim-bookworm
@@ -30,4 +30,4 @@ COPY . .
 EXPOSE 8000
 
 # 启动命令
-CMD ["python", "main.py"]
+CMD ["python", "tests/mock_server.py"]
