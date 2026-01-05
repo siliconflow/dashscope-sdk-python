@@ -1,0 +1,62 @@
+name: Build Docker image
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - v1
+  release:
+    types: [published]
+
+concurrency:
+  group: docker-blobcache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_image:
+    name: Push Docker image to hub.6scloud.com
+    runs-on: ubuntu-latest
+    # 保持原有的权限检查，如果不是在该 organization 下运行请移除此行
+    if: github.repository_owner == 'siliconflow'
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: hub.6scloud.com
+          username: ${{ secrets.HUB_6S_CLOUD_USERNAME }}
+          password: ${{ secrets.HUB_6S_CLOUD_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION=${{ github.ref_name }}
+          else
+            # 使用前 7 位 commit hash 作为短版本号
+            VERSION=$(echo ${{ github.sha }} | cut -c1-7)
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            hub.6scloud.com/d1r7umcsfi9c73b4drdg/blobcache:latest
+            hub.6scloud.com/d1r7umcsfi9c73b4drdg/blobcache:${{ steps.get_version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
