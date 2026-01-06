@@ -1,24 +1,29 @@
+# syntax=docker/dockerfile:1
+
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install system deps (minimal)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Install uv (better: copy the static binary from the official uv image)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install uv
-RUN pip install --no-cache-dir uv
+# Optional but common: keep uv caches in a known place
+ENV UV_CACHE_DIR=/root/.cache/uv
 
-# Copy dependency files first (better cache)
-COPY pyproject.toml uv.lock* ./
+# Copy only dependency inputs first for better Docker layer caching
+COPY pyproject.toml uv.lock ./
 
-# Install dependencies
-RUN uv install --no-cache-dir .
+# Create/sync the project environment from the lockfile
+# --frozen: fail if lock and project metadata don't match; don't update the lock
+# --no-dev: skip dev dependency groups in the final image
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-# Copy app code
+# Now copy the rest of the app
 COPY . .
 
-EXPOSE 8000
+# Make sure the venv's executables are on PATH
+ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["python", "tests/mock_server.py"]
+EXPOSE 8000
+CMD ["uv", "run", "--frozen", "python", "tests/mock_server.py"]
