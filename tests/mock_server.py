@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any, Union, AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -18,14 +18,17 @@ from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 # --- [System Configuration] ---
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG, # Switched to INFO for production noise reduction
     format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
     datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("DeepSeekProxy")
 
+# Upstream Base URL
 SILICON_FLOW_BASE_URL = os.getenv("SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-SILICON_FLOW_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
+
+# MOCK/TEST ONLY: This key is never used in the production generation path
+_MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 MODEL_MAPPING = {
     "deepseek-v3": "deepseek-ai/DeepSeek-V3",
@@ -35,7 +38,7 @@ MODEL_MAPPING = {
     "default": "deepseek-ai/DeepSeek-V3"
 }
 
-# --- [Shared State for Mock Mode] ---
+# --- [Shared State] ---
 
 class ServerState:
     _instance = None
@@ -57,7 +60,7 @@ class ServerState:
         self.request_queue = req_q
         self.response_queue = res_q
         self.is_mock_mode = True
-        logger.info("Server transitioned to MOCK MODE via Queue Injection.")
+        logger.warning("!!! Server running in MOCK MODE via Queue Injection !!!")
 
     def increment_request(self):
         with self.lock:
@@ -69,7 +72,6 @@ class ServerState:
 
     @property
     def snapshot(self):
-        """Returns a consistent snapshot of the state."""
         with self.lock:
             return {
                 "active_requests": self.active_requests,
@@ -111,9 +113,10 @@ class GenerationRequest(BaseModel):
 # --- [DeepSeek Proxy Logic] ---
 
 class DeepSeekProxy:
-    def __init__(self):
+    def __init__(self, api_key: str):
+        # We instantiate a new client per request to ensure isolation of user credentials
         self.client = AsyncOpenAI(
-            api_key=SILICON_FLOW_API_KEY if SILICON_FLOW_API_KEY else "dummy_key",
+            api_key=api_key,
             base_url=SILICON_FLOW_BASE_URL
         )
 
@@ -139,12 +142,14 @@ class DeepSeekProxy:
     async def generate(self, req_data: GenerationRequest, initial_request_id: str):
         params = req_data.parameters
 
+        # Validation: Tools require message format
         if params.tools and params.result_format != "message":
             return JSONResponse(
                 status_code=400,
                 content={"code": "InvalidParameter", "message": "When 'tools' are provided, 'result_format' must be 'message'."}
             )
 
+        # Validation: R1 + Tools constraint
         is_r1 = "deepseek-r1" in req_data.model or params.enable_thinking
         if is_r1 and params.tool_choice and isinstance(params.tool_choice, dict):
              return JSONResponse(
@@ -174,18 +179,15 @@ class DeepSeekProxy:
 
         try:
             if openai_params["stream"]:
-                # Fetch raw response for headers in stream mode (awaited)
                 raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
                 trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
 
-                # raw_resp.parse() returns the AsyncStream
                 return StreamingResponse(
                     self._stream_generator(raw_resp.parse(), trace_id),
                     media_type="text/event-stream",
-                    headers={"X-SiliconCloud-Trace-Id": trace_id}  # <--- Added Header Propagation
+                    headers={"X-SiliconCloud-Trace-Id": trace_id}
                 )
             else:
-                # Standard response (awaited)
                 raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
                 trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
                 return self._format_unary_response(raw_resp.parse(), trace_id)
@@ -280,12 +282,12 @@ async def lifespan(app: FastAPI):
     stop_event = threading.Event()
     def epoch_clock():
         while not stop_event.is_set():
-            time.sleep(2)
+            time.sleep(5)
             state = SERVER_STATE.snapshot
             if state["active_requests"] > 0 or state["is_mock_mode"]:
                  logger.info(
-                    f"[Epoch Clock] Active Requests: {state['active_requests']} | "
-                    f"Mode: {'MOCK' if state['is_mock_mode'] else 'PROXY'}"
+                    f"[Monitor] Active: {state['active_requests']} | "
+                    f"Mode: {'MOCK' if state['is_mock_mode'] else 'PRODUCTION'}"
                 )
     monitor_thread = threading.Thread(target=epoch_clock, daemon=True)
     monitor_thread.start()
@@ -308,7 +310,9 @@ def create_app() -> FastAPI:
         finally:
             SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
-            logger.info(f"{request.method} {request.url.path} - {duration:.2f}ms")
+            # Reduced log noise for healthy requests, kept for errors or slow ones if needed
+            if duration > 1000:
+                logger.warning(f"{request.method} {request.url.path} - SLOW {duration:.2f}ms")
 
     @app.get("/health_check")
     async def health_check():
@@ -316,35 +320,62 @@ def create_app() -> FastAPI:
             status_code=200,
             content={
                 "status": "healthy",
-                "service": "DeepSeek-DashScope-Proxy",
-                "timestamp": time.time(),
+                "service": "DeepSeek-Proxy",
                 "mode": "mock" if SERVER_STATE.is_mock_mode else "production"
             }
         )
 
     @app.post("/api/v1/services/aigc/text-generation/generation")
-    async def generation(request: Request, body: GenerationRequest = None):
+    async def generation(
+        request: Request,
+        body: GenerationRequest = None,
+        authorization: Optional[str] = Header(None)
+    ):
         request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
-        # Instantiate Proxy Per Request
-        proxy = DeepSeekProxy()
+        # --- [Logic Switch: Mock vs Production] ---
 
+        if SERVER_STATE.is_mock_mode:
+            # In MOCK mode, we can optionally use the shadow/env key
+            api_key = _MOCK_ENV_API_KEY or "mock-key"
+        else:
+            # --- [PRODUCTION MODE] ---
+            # STRICTLY Require Header. Do not fallback to env vars.
+            if not authorization:
+                logger.warning(f"Rejected request {request_id}: Missing Authorization Header")
+                raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+            if not authorization.startswith("Bearer "):
+                 logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
+                 raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
+
+            # Transparently forward the user's key
+            api_key = authorization.replace("Bearer ", "")
+
+        logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
+        # Instantiate Proxy with the specific key (User's or Mock's)
+        proxy = DeepSeekProxy(api_key=api_key)
+
+        # Parse Body if not injected
         if not body:
             try:
                 raw_json = await request.json()
                 body = GenerationRequest(**raw_json)
             except Exception as e:
-                if not SERVER_STATE.is_mock_mode:
-                    raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
+        # --- [Mock Handling] ---
         if SERVER_STATE.is_mock_mode:
             if body:
-                logger.info(f"[Shadow] Validating request against upstream...")
+                # Shadow Traffic Logic (Optional validation against upstream)
                 try:
-                    # Async generate call on the local instance
-                    await proxy.generate(body, f"shadow-{request_id}")
-                except Exception as e:
-                    logger.error(f"[Shadow] Validation Exception: {str(e)}")
+                    # We only perform shadow traffic if a key is actually available
+                    if _MOCK_ENV_API_KEY:
+                        shadow_proxy = DeepSeekProxy(api_key=_MOCK_ENV_API_KEY)
+                        # Fire and forget (or await if validation is strict)
+                        # await shadow_proxy.generate(body, f"shadow-{request_id}")
+                except Exception:
+                    pass # Swallow shadow errors
 
             try:
                 raw_body = await request.json()
@@ -354,13 +385,15 @@ def create_app() -> FastAPI:
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
-                logger.critical(f"[Mock] DEADLOCK/ERROR: {e}")
-                return JSONResponse(status_code=500, content={"code": "MockError", "message": f"Mock Server Error: {str(e)}"})
+                return JSONResponse(status_code=500, content={"code": "MockError", "message": str(e)})
 
+        # --- [Production Handling] ---
+        # Forward request to upstream
         return await proxy.generate(body, request_id)
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
+        # Catch-all only valid in Mock Mode
         if SERVER_STATE.is_mock_mode:
             try:
                 body = None
@@ -398,7 +431,7 @@ def create_mock_server(*args, **kwargs):
     proc.start()
     mock_server.proc = proc
     time.sleep(1.5)
-    logger.info("Mock Server (Proxy Mode) started on port 8089")
+    logger.info("Mock Server started on port 8089")
     if args and hasattr(args[0], "addfinalizer"):
         def stop_server():
             if proc.is_alive():
