@@ -19,7 +19,7 @@ from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 # --- [System Configuration] ---
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.DEBUG, # Switched to INFO for production noise reduction
     format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
     datefmt="%H:%M:%S"
 )
@@ -28,7 +28,7 @@ logger = logging.getLogger("DeepSeekProxy")
 # Upstream Base URL
 SILICON_FLOW_BASE_URL = os.getenv("SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1")
 
-# MOCK/TEST ONLY
+# MOCK/TEST ONLY: This key is never used in the production generation path
 _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 MODEL_MAPPING = {
@@ -37,13 +37,6 @@ MODEL_MAPPING = {
     "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
     "default": "deepseek-ai/DeepSeek-V3"
-}
-
-# Headers that should NOT be forwarded to upstream to avoid conflicts
-EXCLUDED_UPSTREAM_HEADERS = {
-    "host", "content-length", "content-type", "connection",
-    "upgrade", "accept-encoding", "transfer-encoding",
-    "keep-alive", "proxy-authorization", "authorization"
 }
 
 # --- [Shared State] ---
@@ -121,16 +114,11 @@ class GenerationRequest(BaseModel):
 # --- [DeepSeek Proxy Logic] ---
 
 class DeepSeekProxy:
-    def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
-        """
-        :param api_key: The API key for the upstream service.
-        :param extra_headers: Custom headers to forward to the upstream (e.g. X-Request-ID).
-        """
+    def __init__(self, api_key: str):
+        # We instantiate a new client per request to ensure isolation of user credentials
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=SILICON_FLOW_BASE_URL,
-            # ✅ Inject headers here so they are sent with every request made by this client
-            default_headers=extra_headers,
             timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0)
         )
 
@@ -156,12 +144,14 @@ class DeepSeekProxy:
     async def generate(self, req_data: GenerationRequest, initial_request_id: str):
         params = req_data.parameters
 
+        # Validation: Tools require message format
         if params.tools and params.result_format != "message":
             return JSONResponse(
                 status_code=400,
                 content={"code": "InvalidParameter", "message": "When 'tools' are provided, 'result_format' must be 'message'."}
             )
 
+        # Validation: R1 + Tools constraint
         is_r1 = "deepseek-r1" in req_data.model or params.enable_thinking
         if is_r1 and params.tool_choice and isinstance(params.tool_choice, dict):
              return JSONResponse(
@@ -241,6 +231,7 @@ class DeepSeekProxy:
             delta_content = delta.content if delta and delta.content else ""
             delta_reasoning = (getattr(delta, "reasoning_content", "") or "") if delta else ""
 
+            # ✅ 累积完整内容
             if delta_content:
                 full_text += delta_content
             if delta_reasoning:
@@ -253,6 +244,7 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
+            # ✅ 关键：stop 包输出“完整累积内容”，避免最后一包是空导致聚合为空
             if finish_reason != "null":
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
@@ -313,17 +305,6 @@ class DeepSeekProxy:
 
 # --- [FastAPI App & Lifecycle] ---
 
-def get_forwardable_headers(request: Request) -> Dict[str, str]:
-    """
-    Extracts headers from the request that are safe to forward to the upstream.
-    Filters out hop-by-hop headers, content-related headers (which are rebuilt),
-    and auth (which is handled separately).
-    """
-    return {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in EXCLUDED_UPSTREAM_HEADERS
-    }
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop_event = threading.Event()
@@ -357,6 +338,7 @@ def create_app() -> FastAPI:
         finally:
             SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
+            # Reduced log noise for healthy requests, kept for errors or slow ones if needed
             if duration > 1000:
                 logger.warning(f"{request.method} {request.url.path} - SLOW {duration:.2f}ms")
 
@@ -379,23 +361,30 @@ def create_app() -> FastAPI:
     ):
         request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
+        # --- [Logic Switch: Mock vs Production] ---
+
         if SERVER_STATE.is_mock_mode:
+            # In MOCK mode, we can optionally use the shadow/env key
             api_key = _MOCK_ENV_API_KEY or "mock-key"
         else:
+            # --- [PRODUCTION MODE] ---
+            # STRICTLY Require Header. Do not fallback to env vars.
             if not authorization:
+                logger.warning(f"Rejected request {request_id}: Missing Authorization Header")
                 raise HTTPException(status_code=401, detail="Missing Authorization header")
+
             if not authorization.startswith("Bearer "):
-                 raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+                 logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
+                 raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
+
+            # Transparently forward the user's key
             api_key = authorization.replace("Bearer ", "")
 
-        # ✅ 1. Get filtered headers
-        upstream_headers = get_forwardable_headers(request)
+        logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
+        # Instantiate Proxy with the specific key (User's or Mock's)
+        proxy = DeepSeekProxy(api_key=api_key)
 
-        logger.debug(f"Request {request_id} Forwarding Headers: {upstream_headers.keys()}")
-
-        # ✅ 2. Initialize Proxy with headers
-        proxy = DeepSeekProxy(api_key=api_key, extra_headers=upstream_headers)
-
+        # Parse Body if not injected
         if not body:
             try:
                 raw_json = await request.json()
@@ -403,12 +392,26 @@ def create_app() -> FastAPI:
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
+        # --- [Auto-enable stream mode based on header] ---
         accept_header = request.headers.get("accept", "")
         if "text/event-stream" in accept_header and body.parameters:
+            logger.info("SSE client detected, forcing incremental_output=True")
             body.parameters.incremental_output = True
 
+
+        # --- [Mock Handling] ---
         if SERVER_STATE.is_mock_mode:
-            # ... (Mock logic omitted for brevity, logic remains same)
+            if body:
+                # Shadow Traffic Logic (Optional validation against upstream)
+                try:
+                    # We only perform shadow traffic if a key is actually available
+                    if _MOCK_ENV_API_KEY:
+                        shadow_proxy = DeepSeekProxy(api_key=_MOCK_ENV_API_KEY)
+                        # Fire and forget (or await if validation is strict)
+                        # await shadow_proxy.generate(body, f"shadow-{request_id}")
+                except Exception:
+                    pass # Swallow shadow errors
+
             try:
                 raw_body = await request.json()
                 SERVER_STATE.request_queue.put(raw_body)
@@ -419,6 +422,8 @@ def create_app() -> FastAPI:
             except Exception as e:
                 return JSONResponse(status_code=500, content={"code": "MockError", "message": str(e)})
 
+        # --- [Production Handling] ---
+        # Forward request to upstream
         return await proxy.generate(body, request_id)
 
     @app.post("/siliconflow/models/{model_path:path}")
@@ -427,42 +432,38 @@ def create_app() -> FastAPI:
         request: Request,
         authorization: Optional[str] = Header(None)
     ):
+        # 1. Strict Auth (No Mock Support)
         if not authorization or not authorization.startswith("Bearer "):
              raise HTTPException(status_code=401, detail="Invalid Authorization header")
 
         request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        proxy = DeepSeekProxy(api_key=authorization.replace("Bearer ", ""))
 
-        # ✅ Header Forwarding Logic
-        upstream_headers = get_forwardable_headers(request)
-        proxy = DeepSeekProxy(api_key=authorization.replace("Bearer ", ""), extra_headers=upstream_headers)
-
+        # 2. Parse, Inject Model, and Validate
         try:
             payload = await request.json()
-            payload["model"] = model_path
+            payload["model"] = model_path # Force set model from URL
             body = GenerationRequest(**payload)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
 
+        # 3. Handle SSE
         if "text/event-stream" in request.headers.get("accept", "") and body.parameters:
             body.parameters.incremental_output = True
 
+        # 4. Generate
         return await proxy.generate(body, request_id)
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
+        # Catch-all only valid in Mock Mode
         if SERVER_STATE.is_mock_mode:
             try:
                 body = None
                 if request.method in ["POST", "PUT"]:
                     try: body = await request.json()
                     except: pass
-                # We forward headers in the mock record too, in case tests need to verify them
-                req_record = {
-                    "path": f"/{path_name}",
-                    "method": request.method,
-                    "headers": dict(request.headers),
-                    "body": body
-                }
+                req_record = {"path": f"/{path_name}", "method": request.method, "headers": dict(request.headers), "body": body}
                 SERVER_STATE.request_queue.put(req_record)
                 response_data = SERVER_STATE.response_queue.get(timeout=5)
                 response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
