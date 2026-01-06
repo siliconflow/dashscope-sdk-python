@@ -11,9 +11,10 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
 # --- [System Configuration] ---
@@ -100,12 +101,24 @@ class Parameters(BaseModel):
     top_p: Optional[float] = 0.8
     top_k: Optional[int] = None
     seed: Optional[int] = 1234
-    max_tokens: Optional[int] = None
+    max_tokens: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("max_tokens", "max_length")
+    )
+    frequency_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = 0.0
+    repetition_penalty: Optional[float] = 1.0
+
+    # OpenAI原生格式
     stop: Optional[Union[str, List[str]]] = None
+    # DashScope兼容格式
+    stop_words: Optional[List[Dict[str, Any]]] = None
     enable_thinking: bool = False
     thinking_budget: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    # 显式开启从属性名读取
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 class GenerationRequest(BaseModel):
     model: str
@@ -179,14 +192,84 @@ class DeepSeekProxy:
             "stream": params.incremental_output or params.enable_thinking,
         }
 
+        if params.frequency_penalty is not None:
+            openai_params["frequency_penalty"] = params.frequency_penalty
+
+        if params.presence_penalty is not None:
+            openai_params["presence_penalty"] = params.presence_penalty
+
+        extra_body = {}
+        # 不是 OpenAI 标准参数，必须放入 extra_body
+        # === [校验与修正逻辑] ===
+
+        # 1. 校验 repetition_penalty (解决 deepseek_case_22)
+        # DashScope 要求 > 0.0，否则报错 InvalidParameter
+        if params.repetition_penalty is not None:
+            if params.repetition_penalty <= 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Repetition_penalty should be greater than 0.0"
+                    }
+                )
+            extra_body["repetition_penalty"] = params.repetition_penalty
+
+        # 2. 校验 top_k
+        if params.top_k is not None:
+            # 2.1 负数校验 (解决 deepseek_case_18)
+            # 此时 Pydantic 已经确保它是 int，这里检查数值
+            if params.top_k < 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Parameter top_k be greater than or equal to 0"
+                    }
+                )
+
+            # 2.2 上限截断 (解决 deepseek_case_28)
+            # SiliconFlow 限制 top_k 为 [1, 100]。
+            # 如果用户传 0，通常对应 disable (即 -1) 或由模型决定，这里映射为 -1 比较稳妥
+            # 如果用户传 > 100 (如 1025)，必须截断为 100，否则上游报错
+            if params.top_k == 0:
+                extra_body["top_k"] = -1  # Disable
+            elif params.top_k > 100:
+                extra_body["top_k"] = 100 # Clamp to max supported by upstream
+            else:
+                extra_body["top_k"] = params.top_k
+        if extra_body:
+            openai_params["extra_body"] = extra_body
+
         if params.tools:
             openai_params["tools"] = params.tools
             if params.tool_choice:
                 openai_params["tool_choice"] = params.tool_choice
 
-        if params.max_tokens: openai_params["max_tokens"] = params.max_tokens
-        if params.stop: openai_params["stop"] = params.stop
+        if params.max_tokens is not None:
+            openai_params["max_tokens"] = params.max_tokens
+            logger.debug(f"[Request] Truncation enabled: max_tokens={params.max_tokens}")
+        else:
+            logger.debug("[Request] No max_tokens found in parameters, model will generate full response")
+
         if params.seed: openai_params["seed"] = params.seed
+
+        # === 处理 Stop Words 兼容性 ===
+        # 优先使用 OpenAI 原生 stop 参数
+        if params.stop:
+            openai_params["stop"] = params.stop
+        # 如果没有 stop 但有 stop_words (DashScope 格式)，则进行转换
+        elif params.stop_words:
+            # 提取所有 mode="exclude" (默认) 的 stop_str
+            # 注意：DashScope 的 stop_words 是 list[dict] 结构
+            stop_list = []
+            for sw in params.stop_words:
+                # 仅处理 exclude 模式或未指定模式的词
+                if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
+                    stop_list.append(sw["stop_str"])
+
+            if stop_list:
+                openai_params["stop"] = stop_list
 
         try:
             if openai_params["stream"]:
@@ -204,7 +287,7 @@ class DeepSeekProxy:
                 return self._format_unary_response(raw_resp.parse(), trace_id)
 
         except APIError as e:
-            logger.error(f"Upstream API Error: {str(e)}")
+            logger.error(f"[request id: {initial_request_id}] Upstream API Error: {str(e)}")
             error_code = "InternalError"
             if isinstance(e, RateLimitError): error_code = "Throttling.RateQuota"
             elif isinstance(e, AuthenticationError): error_code = "InvalidApiKey"
@@ -358,6 +441,23 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request, exc):
+        # 提取第一个错误的关键信息，拼接成 DashScope 风格的错误信息
+        error_msg = exc.errors()[0].get("msg", "Invalid parameter")
+        loc = exc.errors()[0].get("loc", [])
+        param_name = loc[-1] if loc else "unknown"
+
+        logger.error(f"Validation Error: {exc.errors()}")
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "InvalidParameter",
+                "message": f"<400> InternalError.Algo.InvalidParameter: Parameter {param_name} check failed: {error_msg}"
+            }
+        )
 
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
