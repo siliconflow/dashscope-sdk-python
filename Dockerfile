@@ -2,12 +2,23 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# 复制源代码
-COPY . .
-uv install --no-cache-dir .
+# Install system deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# 暴露端口
+# Install uv
+RUN pip install --no-cache-dir uv
+
+# Copy dependency files first (better cache)
+COPY pyproject.toml uv.lock* ./
+
+# Install dependencies
+RUN uv install --system --no-cache-dir
+
+# Copy app code
+COPY . .
+
 EXPOSE 8000
 
-# 启动命令
 CMD ["python", "tests/mock_server.py"]
