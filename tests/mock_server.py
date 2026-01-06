@@ -38,6 +38,7 @@ MODEL_MAPPING = {
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
     "default": "deepseek-ai/DeepSeek-V3"
 }
+DUMMY_KEY = "dummy-key"
 
 # --- [Shared State] ---
 
@@ -117,11 +118,12 @@ class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
         logger.debug("Initializing DeepSeekProxy client with headers: %s", extra_headers)
+        kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
         self.client = AsyncOpenAI(
-            api_key=api_key,
             base_url=SILICON_FLOW_BASE_URL,
             timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0),
-            default_headers=extra_headers  # 透传 Header
+            default_headers=extra_headers,  # 透传 Header
+            **kv
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
@@ -327,7 +329,7 @@ async def lifespan(app: FastAPI):
 def _prepare_proxy_and_headers(request: Request, authorization: Optional[str]) -> tuple[DeepSeekProxy, str]:
     """Helper to extract API key, filter headers, and instantiate the proxy."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-    api_key = "dummy-key"
+    api_key = DUMMY_KEY
 
     if SERVER_STATE.is_mock_mode:
         api_key = _MOCK_ENV_API_KEY or "mock-key"
