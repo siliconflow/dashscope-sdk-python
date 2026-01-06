@@ -224,7 +224,7 @@ class DeepSeekProxy:
 
             delta = chunk.choices[0].delta if chunk.choices else None
             content = delta.content if delta and delta.content else ""
-            reasoning = getattr(delta, "reasoning_content", "") if delta else ""
+            reasoning = (getattr(delta, "reasoning_content", "") or "") if delta else ""
 
             tool_calls = None
             if delta and delta.tool_calls:
