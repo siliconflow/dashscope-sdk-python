@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DeepSeekProxy")
 
-SILICON_FLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+SILICON_FLOW_BASE_URL = os.getenv("SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1")
 SILICON_FLOW_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 MODEL_MAPPING = {
