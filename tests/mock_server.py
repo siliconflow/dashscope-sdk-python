@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from openai import OpenAI, APIError, RateLimitError, AuthenticationError
+from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
 # --- [System Configuration] ---
 
@@ -112,8 +112,8 @@ class GenerationRequest(BaseModel):
 
 class DeepSeekProxy:
     def __init__(self):
-        self.client = OpenAI(
-            api_key=SILICON_FLOW_API_KEY if SILICON_FLOW_API_KEY else None,
+        self.client = AsyncOpenAI(
+            api_key=SILICON_FLOW_API_KEY if SILICON_FLOW_API_KEY else "dummy_key",
             base_url=SILICON_FLOW_BASE_URL
         )
 
@@ -174,15 +174,17 @@ class DeepSeekProxy:
 
         try:
             if openai_params["stream"]:
-                # Fetch raw response for headers in stream mode
-                raw_resp = self.client.chat.completions.with_raw_response.create(**openai_params)
+                # Fetch raw response for headers in stream mode (awaited)
+                raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
                 trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
+                # raw_resp.parse() returns the AsyncStream
                 return StreamingResponse(
                     self._stream_generator(raw_resp.parse(), trace_id),
                     media_type="text/event-stream"
                 )
             else:
-                raw_resp = self.client.chat.completions.with_raw_response.create(**openai_params)
+                # Standard response (awaited)
+                raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
                 trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
                 return self._format_unary_response(raw_resp.parse(), trace_id)
 
@@ -204,7 +206,7 @@ class DeepSeekProxy:
         }
         finish_reason = "null"
 
-        for chunk in stream:
+        async for chunk in stream:
             if chunk.usage:
                 accumulated_usage["total_tokens"] = chunk.usage.total_tokens
                 accumulated_usage["input_tokens"] = chunk.usage.prompt_tokens
@@ -289,7 +291,6 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
     )
-    proxy = DeepSeekProxy()
 
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
@@ -319,6 +320,9 @@ def create_app() -> FastAPI:
     async def generation(request: Request, body: GenerationRequest = None):
         request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
+        # Instantiate Proxy Per Request
+        proxy = DeepSeekProxy()
+
         if not body:
             try:
                 raw_json = await request.json()
@@ -331,6 +335,7 @@ def create_app() -> FastAPI:
             if body:
                 logger.info(f"[Shadow] Validating request against upstream...")
                 try:
+                    # Async generate call on the local instance
                     await proxy.generate(body, f"shadow-{request_id}")
                 except Exception as e:
                     logger.error(f"[Shadow] Validation Exception: {str(e)}")
