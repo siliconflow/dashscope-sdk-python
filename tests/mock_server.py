@@ -116,6 +116,7 @@ class GenerationRequest(BaseModel):
 class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
+        logger.debug("Initializing DeepSeekProxy client with headers: %s", extra_headers)
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=SILICON_FLOW_BASE_URL,
