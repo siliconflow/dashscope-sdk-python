@@ -366,6 +366,13 @@ def create_app() -> FastAPI:
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
+        # --- [Auto-enable stream mode based on header] ---
+        accept_header = request.headers.get("accept", "")
+        if "text/event-stream" in accept_header and body.parameters:
+            logger.info("SSE client detected, forcing incremental_output=True")
+            body.parameters.incremental_output = True
+
+
         # --- [Mock Handling] ---
         if SERVER_STATE.is_mock_mode:
             if body:
