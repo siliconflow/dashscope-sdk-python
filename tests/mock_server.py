@@ -212,6 +212,9 @@ class DeepSeekProxy:
         }
         finish_reason = "null"
 
+        full_text = ""
+        full_reasoning = ""
+
         async for chunk in stream:
             if chunk.usage:
                 accumulated_usage["total_tokens"] = chunk.usage.total_tokens
@@ -220,11 +223,19 @@ class DeepSeekProxy:
                 details = getattr(chunk.usage, "completion_tokens_details", None)
                 if details:
                     accumulated_usage["output_tokens_details"]["reasoning_tokens"] = getattr(details, "reasoning_tokens", 0)
-                    accumulated_usage["output_tokens_details"]["text_tokens"] = accumulated_usage["output_tokens"] - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
+                    accumulated_usage["output_tokens_details"]["text_tokens"] = (
+                        accumulated_usage["output_tokens"] - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
+                    )
 
             delta = chunk.choices[0].delta if chunk.choices else None
-            content = delta.content if delta and delta.content else ""
-            reasoning = (getattr(delta, "reasoning_content", "") or "") if delta else ""
+            delta_content = delta.content if delta and delta.content else ""
+            delta_reasoning = (getattr(delta, "reasoning_content", "") or "") if delta else ""
+
+            # ✅ 累积完整内容
+            if delta_content:
+                full_text += delta_content
+            if delta_reasoning:
+                full_reasoning += delta_reasoning
 
             tool_calls = None
             if delta and delta.tool_calls:
@@ -233,8 +244,21 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            message_body = {"role": "assistant", "content": content, "reasoning_content": reasoning}
-            if tool_calls: message_body["tool_calls"] = tool_calls
+            # ✅ 关键：stop 包输出“完整累积内容”，避免最后一包是空导致聚合为空
+            if finish_reason != "null":
+                content_to_send = full_text
+                reasoning_to_send = full_reasoning
+            else:
+                content_to_send = delta_content
+                reasoning_to_send = delta_reasoning
+
+            message_body = {
+                "role": "assistant",
+                "content": content_to_send,
+                "reasoning_content": reasoning_to_send
+            }
+            if tool_calls:
+                message_body["tool_calls"] = tool_calls
 
             response_body = {
                 "output": {"choices": [{"message": message_body, "finish_reason": finish_reason}]},
@@ -242,7 +266,9 @@ class DeepSeekProxy:
                 "request_id": request_id
             }
             yield f"data: {json.dumps(response_body, ensure_ascii=False)}\n\n"
-            if finish_reason != "null": break
+
+            if finish_reason != "null":
+                break
 
     def _format_unary_response(self, completion, request_id: str):
         choice = completion.choices[0]
