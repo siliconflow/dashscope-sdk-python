@@ -323,6 +323,28 @@ async def lifespan(app: FastAPI):
     yield
     stop_event.set()
 
+def _prepare_proxy_and_headers(request: Request, authorization: Optional[str]) -> tuple[DeepSeekProxy, str]:
+    """Helper to extract API key, filter headers, and instantiate the proxy."""
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    api_key = "dummy-key"
+
+    if SERVER_STATE.is_mock_mode:
+        api_key = _MOCK_ENV_API_KEY or "mock-key"
+    elif authorization:
+        if not authorization.startswith("Bearer "):
+            logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
+            raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
+        api_key = authorization.replace("Bearer ", "")
+
+    logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
+
+    unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
+    forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
+
+    proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
+    return proxy, request_id
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="DeepSeek-DashScope Proxy", lifespan=lifespan)
     app.add_middleware(
@@ -360,30 +382,7 @@ def create_app() -> FastAPI:
         body: GenerationRequest = None,
         authorization: Optional[str] = Header(None)
     ):
-        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-
-        # --- [Logic Switch: Mock vs Production] ---
-
-        api_key = "dummy-key"
-        if SERVER_STATE.is_mock_mode:
-            # In MOCK mode, we can optionally use the shadow/env key
-            api_key = _MOCK_ENV_API_KEY or "mock-key"
-        elif authorization:
-            if not authorization.startswith("Bearer "):
-                 logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
-                 raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
-
-            # Transparently forward the user's key
-            api_key = authorization.replace("Bearer ", "")
-
-        logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
-
-        # 过滤掉不安全的或由 httpx 库自动管理的 Headers
-        unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
-        forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
-
-        # Instantiate Proxy with the specific key AND headers
-        proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
+        proxy, request_id = _prepare_proxy_and_headers(request, authorization)
 
         # Parse Body if not injected
         if not body:
@@ -433,19 +432,7 @@ def create_app() -> FastAPI:
         request: Request,
         authorization: Optional[str] = Header(None)
     ):
-        api_key = "dummy-key"
-        if authorization:
-            if not authorization.startswith("Bearer "):
-                 logger.warning("Rejected request: Invalid Authorization Format")
-                 raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
-            api_key = authorization.replace("Bearer ", "")
-
-        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-
-        unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
-        forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
-
-        proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
+        proxy, request_id = _prepare_proxy_and_headers(request, authorization)
 
         # 2. Parse, Inject Model, and Validate
         try:
