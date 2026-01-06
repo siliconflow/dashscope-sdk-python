@@ -1,3 +1,4 @@
+import httpx
 import os
 import json
 import time
@@ -117,7 +118,8 @@ class DeepSeekProxy:
         # We instantiate a new client per request to ensure isolation of user credentials
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url=SILICON_FLOW_BASE_URL
+            base_url=SILICON_FLOW_BASE_URL,
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0)
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
