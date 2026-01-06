@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock* ./
 
 # Install dependencies
-RUN uv install --system --no-cache-dir
+RUN uv install --no-cache-dir .
 
 # Copy app code
 COPY . .
