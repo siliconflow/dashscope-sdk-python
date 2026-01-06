@@ -4,7 +4,7 @@ WORKDIR /app
 
 # 复制源代码
 COPY . .
-uv install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir .
+uv install --no-cache-dir .
 
 # 暴露端口
 EXPOSE 8000
