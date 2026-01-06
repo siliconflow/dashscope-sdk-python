@@ -118,6 +118,11 @@ class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
         logger.debug("Initializing DeepSeekProxy client with headers: %s", extra_headers)
+        if extra_headers is None:
+            extra_headers = {}
+        if "x-api-key" in extra_headers and extra_headers["x-api-key"]:
+            api_key = extra_headers["x-api-key"]
+
         kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
