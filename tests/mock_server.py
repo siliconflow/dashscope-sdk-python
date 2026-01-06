@@ -177,10 +177,12 @@ class DeepSeekProxy:
                 # Fetch raw response for headers in stream mode (awaited)
                 raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
                 trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
+
                 # raw_resp.parse() returns the AsyncStream
                 return StreamingResponse(
                     self._stream_generator(raw_resp.parse(), trace_id),
-                    media_type="text/event-stream"
+                    media_type="text/event-stream",
+                    headers={"X-SiliconCloud-Trace-Id": trace_id}  # <--- Added Header Propagation
                 )
             else:
                 # Standard response (awaited)
@@ -265,7 +267,11 @@ class DeepSeekProxy:
             "usage": usage_data,
             "request_id": request_id
         }
-        return JSONResponse(content=response_body)
+
+        return JSONResponse(
+            content=response_body,
+            headers={"X-SiliconCloud-Trace-Id": request_id}
+        )
 
 # --- [FastAPI App & Lifecycle] ---
 
