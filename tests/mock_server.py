@@ -114,12 +114,13 @@ class GenerationRequest(BaseModel):
 # --- [DeepSeek Proxy Logic] ---
 
 class DeepSeekProxy:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=SILICON_FLOW_BASE_URL,
-            timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0)
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0),
+            default_headers=extra_headers  # 透传 Header
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
@@ -363,16 +364,11 @@ def create_app() -> FastAPI:
 
         # --- [Logic Switch: Mock vs Production] ---
 
+        api_key = "dummy-key"
         if SERVER_STATE.is_mock_mode:
             # In MOCK mode, we can optionally use the shadow/env key
             api_key = _MOCK_ENV_API_KEY or "mock-key"
-        else:
-            # --- [PRODUCTION MODE] ---
-            # STRICTLY Require Header. Do not fallback to env vars.
-            if not authorization:
-                logger.warning(f"Rejected request {request_id}: Missing Authorization Header")
-                raise HTTPException(status_code=401, detail="Missing Authorization header")
-
+        elif authorization:
             if not authorization.startswith("Bearer "):
                  logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
                  raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
@@ -381,8 +377,13 @@ def create_app() -> FastAPI:
             api_key = authorization.replace("Bearer ", "")
 
         logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
-        # Instantiate Proxy with the specific key (User's or Mock's)
-        proxy = DeepSeekProxy(api_key=api_key)
+
+        # 过滤掉不安全的或由 httpx 库自动管理的 Headers
+        unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
+        forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
+
+        # Instantiate Proxy with the specific key AND headers
+        proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
 
         # Parse Body if not injected
         if not body:
@@ -432,12 +433,19 @@ def create_app() -> FastAPI:
         request: Request,
         authorization: Optional[str] = Header(None)
     ):
-        # 1. Strict Auth (No Mock Support)
-        if not authorization or not authorization.startswith("Bearer "):
-             raise HTTPException(status_code=401, detail="Invalid Authorization header")
+        api_key = "dummy-key"
+        if authorization:
+            if not authorization.startswith("Bearer "):
+                 logger.warning("Rejected request: Invalid Authorization Format")
+                 raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
+            api_key = authorization.replace("Bearer ", "")
 
         request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-        proxy = DeepSeekProxy(api_key=authorization.replace("Bearer ", ""))
+
+        unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
+        forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
+
+        proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
 
         # 2. Parse, Inject Model, and Validate
         try:
