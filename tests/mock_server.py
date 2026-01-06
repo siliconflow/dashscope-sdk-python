@@ -426,6 +426,34 @@ def create_app() -> FastAPI:
         # Forward request to upstream
         return await proxy.generate(body, request_id)
 
+    @app.post("/siliconflow/models/{model_path:path}")
+    async def dynamic_path_generation(
+        model_path: str,
+        request: Request,
+        authorization: Optional[str] = Header(None)
+    ):
+        # 1. Strict Auth (No Mock Support)
+        if not authorization or not authorization.startswith("Bearer "):
+             raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
+        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        proxy = DeepSeekProxy(api_key=authorization.replace("Bearer ", ""))
+
+        # 2. Parse, Inject Model, and Validate
+        try:
+            payload = await request.json()
+            payload["model"] = model_path # Force set model from URL
+            body = GenerationRequest(**payload)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
+
+        # 3. Handle SSE
+        if "text/event-stream" in request.headers.get("accept", "") and body.parameters:
+            body.parameters.incremental_output = True
+
+        # 4. Generate
+        return await proxy.generate(body, request_id)
+
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
         # Catch-all only valid in Mock Mode
