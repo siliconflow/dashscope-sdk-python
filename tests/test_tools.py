@@ -3,11 +3,15 @@ import json
 import requests
 from typing import Generator, List, Dict, Any
 from dataclasses import dataclass
+import os
 
 # --- CONSTANTS & CONFIGURATION ---
 # Note: Ensure your MockServer/Proxy is running on this port
+# GATEWAY_URL = "https://api-bailian.siliconflow.cn/api/v1/services/aigc/text-generation/generation"
 GATEWAY_URL = "http://localhost:8000/api/v1/services/aigc/text-generation/generation"
-API_KEY = "sk-test-vector-integrity"
+# GATEWAY_URL = "http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-R1"
+# GATEWAY_URL = "https://api-bailian.siliconflow.cn/siliconflow/models/deepseek-ai/DeepSeek-R1"
+API_KEY = os.getenv("SILICONFLOW_API_KEY", "test_api_key")
 
 # Define the Tool Schema Vector
 TOOL_VECTOR_WEATHER = [
