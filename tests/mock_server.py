@@ -20,14 +20,16 @@ from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 # --- [System Configuration] ---
 
 logging.basicConfig(
-    level=logging.DEBUG, # Switched to INFO for production noise reduction
+    level=logging.DEBUG,  # Switched to INFO for production noise reduction
     format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("DeepSeekProxy")
 
 # Upstream Base URL
-SILICON_FLOW_BASE_URL = os.getenv("SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+SILICON_FLOW_BASE_URL = os.getenv(
+    "SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+)
 
 # MOCK/TEST ONLY: This key is never used in the production generation path
 _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
@@ -37,11 +39,12 @@ MODEL_MAPPING = {
     "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
     "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
-    "default": "deepseek-ai/DeepSeek-V3"
+    "default": "deepseek-ai/DeepSeek-V3",
 }
 DUMMY_KEY = "dummy-key"
 
 # --- [Shared State] ---
+
 
 class ServerState:
     _instance = None
@@ -78,12 +81,14 @@ class ServerState:
         with self.lock:
             return {
                 "active_requests": self.active_requests,
-                "is_mock_mode": self.is_mock_mode
+                "is_mock_mode": self.is_mock_mode,
             }
+
 
 SERVER_STATE = ServerState.get_instance()
 
 # --- [Pydantic Models] ---
+
 
 class Message(BaseModel):
     role: str
@@ -92,12 +97,14 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
 
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra="allow")
+
 
 class InputData(BaseModel):
     messages: Optional[List[Message]] = None
     prompt: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = None
+
 
 class Parameters(BaseModel):
     result_format: str = "message"
@@ -108,8 +115,7 @@ class Parameters(BaseModel):
     top_k: Optional[int] = None
     seed: Optional[int] = 1234
     max_tokens: Optional[int] = Field(
-        None,
-        validation_alias=AliasChoices("max_tokens", "max_length")
+        None, validation_alias=AliasChoices("max_tokens", "max_length")
     )
     frequency_penalty: Optional[float] = 0.0
     presence_penalty: Optional[float] = 0.0
@@ -130,19 +136,25 @@ class Parameters(BaseModel):
     # 显式开启从属性名读取
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
+
 class GenerationRequest(BaseModel):
     model: str
     input: InputData
     parameters: Optional[Parameters] = Field(default_factory=Parameters)
 
+
 # --- [DeepSeek Proxy Logic] ---
+
 
 class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
         if extra_headers is None:
             extra_headers = {}
-        logger.debug("Initializing DeepSeekProxy client with headers: %s", [k for k in extra_headers.keys() if k.lower() != "x-api-key"])
+        logger.debug(
+            "Initializing DeepSeekProxy client with headers: %s",
+            [k for k in extra_headers.keys() if k.lower() != "x-api-key"],
+        )
         if "x-api-key" in extra_headers and extra_headers["x-api-key"]:
             api_key = extra_headers["x-api-key"]
 
@@ -150,9 +162,11 @@ class DeepSeekProxy:
         HOUR = 60 * 60.0
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
-            timeout=httpx.Timeout(connect=10.0, read=(2 * HOUR), write=600.0, pool=10.0),
+            timeout=httpx.Timeout(
+                connect=10.0, read=(2 * HOUR), write=600.0, pool=10.0
+            ),
             default_headers=extra_headers,  # 透传 Header
-            **kv
+            **kv,
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
@@ -185,8 +199,8 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": "<400> InternalError.Algo.InvalidParameter: Range of n should be [1, 4]"
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: Range of n should be [1, 4]",
+                    },
                 )
 
         # === [thinking_budget 校验] ===
@@ -198,8 +212,8 @@ class DeepSeekProxy:
                     content={
                         "code": "InvalidParameter",
                         # 保持与代码库中其他错误一致的格式
-                        "message": "<400> InternalError.Algo.InvalidParameter: thinking_budget should be greater than 0"
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: thinking_budget should be greater than 0",
+                    },
                 )
         # ===================================
 
@@ -214,8 +228,8 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": f"<400> InternalError.Algo.InvalidParameter: 'response_format.type' Invalid value: '{rf_type}'. Supported values are: 'json_object' and 'text'."
-                    }
+                        "message": f"<400> InternalError.Algo.InvalidParameter: 'response_format.type' Invalid value: '{rf_type}'. Supported values are: 'json_object' and 'text'.",
+                    },
                 )
 
             # 校验 json_object 下不能包含 json_schema
@@ -224,8 +238,8 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": "<400> InternalError.Algo.InvalidParameter: Unknown parameter: 'response_format.json_schema'. 'response_format.json_schema' cannot be provided when 'response_format.type' is 'json_object'."
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: Unknown parameter: 'response_format.json_schema'. 'response_format.json_schema' cannot be provided when 'response_format.type' is 'json_object'.",
+                    },
                 )
         # -----------------------------------------------
 
@@ -245,14 +259,16 @@ class DeepSeekProxy:
                         next_msg = msgs[next_idx]
                         # 规则：Assistant call 之后必须紧接 tool 消息
                         if next_msg.role != "tool":
-                            logger.warning(f"Interceptor caught invalid tool chain at index {next_idx}")
+                            logger.warning(
+                                f"Interceptor caught invalid tool chain at index {next_idx}"
+                            )
                             return JSONResponse(
                                 status_code=400,
                                 content={
                                     "code": "InvalidParameter",
                                     # 精确匹配错误格式
-                                    "message": f"<400> InternalError.Algo.InvalidParameter: An assistant message with \"tool_calls\" must be followed by tool messages responding to each \"tool_call_id\". The following tool_call_ids did not have response messages: message[{next_idx}].role"
-                                }
+                                    "message": f'<400> InternalError.Algo.InvalidParameter: An assistant message with "tool_calls" must be followed by tool messages responding to each "tool_call_id". The following tool_call_ids did not have response messages: message[{next_idx}].role',
+                                },
                             )
 
                 # --- Check if Tool message is preceded by Assistant (NEW LOGIC) ---
@@ -263,7 +279,9 @@ class DeepSeekProxy:
                     else:
                         prev_msg = msgs[idx - 1]
                         # Must be assistant AND have tool_calls
-                        if prev_msg.role != "assistant" or not getattr(prev_msg, "tool_calls", None):
+                        if prev_msg.role != "assistant" or not getattr(
+                            prev_msg, "tool_calls", None
+                        ):
                             is_orphan = True
 
                     if is_orphan:
@@ -271,8 +289,8 @@ class DeepSeekProxy:
                             status_code=400,
                             content={
                                 "code": "InvalidParameter",
-                                "message": "<400> InternalError.Algo.InvalidParameter: messages with role \"tool\" must be a response to a preceeding message with \"tool_calls\"."
-                            }
+                                "message": '<400> InternalError.Algo.InvalidParameter: messages with role "tool" must be a response to a preceeding message with "tool_calls".',
+                            },
                         )
                 # -----------------------------------------------------
 
@@ -280,15 +298,21 @@ class DeepSeekProxy:
         if params.tools and params.result_format != "message":
             return JSONResponse(
                 status_code=400,
-                content={"code": "InvalidParameter", "message": "When 'tools' are provided, 'result_format' must be 'message'."}
+                content={
+                    "code": "InvalidParameter",
+                    "message": "When 'tools' are provided, 'result_format' must be 'message'.",
+                },
             )
 
         # Validation: R1 + Tools constraint
         is_r1 = "deepseek-r1" in req_data.model or params.enable_thinking
         if is_r1 and params.tool_choice and isinstance(params.tool_choice, dict):
-             return JSONResponse(
+            return JSONResponse(
                 status_code=400,
-                content={"code": "InvalidParameter", "message": "DeepSeek R1 does not support specific tool_choice binding (dict) while thinking logic is active."}
+                content={
+                    "code": "InvalidParameter",
+                    "message": "DeepSeek R1 does not support specific tool_choice binding (dict) while thinking logic is active.",
+                },
             )
 
         target_model = self._get_mapped_model(req_data.model)
@@ -325,8 +349,8 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": "<400> InternalError.Algo.InvalidParameter: Repetition_penalty should be greater than 0.0"
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: Repetition_penalty should be greater than 0.0",
+                    },
                 )
             extra_body["repetition_penalty"] = params.repetition_penalty
 
@@ -339,8 +363,8 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": "<400> InternalError.Algo.InvalidParameter: Parameter top_k be greater than or equal to 0"
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: Parameter top_k be greater than or equal to 0",
+                    },
                 )
 
             # 2.2 上限截断
@@ -350,15 +374,15 @@ class DeepSeekProxy:
             if params.top_k == 0:
                 extra_body["top_k"] = -1  # Disable
             elif params.top_k > 100:
-                extra_body["top_k"] = 100 # Clamp to max supported by upstream
+                extra_body["top_k"] = 100  # Clamp to max supported by upstream
             else:
                 extra_body["top_k"] = params.top_k
 
         # === [将 thinking_budget 加入 extra_body] ===
         if params.enable_thinking and params.thinking_budget is not None:
-             # 确保只有在开启思考时才透传 budget，且前面已经校验过 >0
-             # 如果上游明确支持 thinking_budget 字段：
-             extra_body["thinking_budget"] = params.thinking_budget
+            # 确保只有在开启思考时才透传 budget，且前面已经校验过 >0
+            # 如果上游明确支持 thinking_budget 字段：
+            extra_body["thinking_budget"] = params.thinking_budget
         # ===============================================
 
         if extra_body:
@@ -372,18 +396,23 @@ class DeepSeekProxy:
                         status_code=400,
                         content={
                             "code": "InvalidParameter",
-                            "message": "<400> InternalError.Algo.InvalidParameter: Invalid tool_choice. It must be 'none', 'auto', or a valid object, not the string 'null'."
-                        }
+                            "message": "<400> InternalError.Algo.InvalidParameter: Invalid tool_choice. It must be 'none', 'auto', or a valid object, not the string 'null'.",
+                        },
                     )
                 openai_params["tool_choice"] = params.tool_choice
 
         if params.max_tokens is not None:
             openai_params["max_tokens"] = params.max_tokens
-            logger.debug(f"[Request] Truncation enabled: max_tokens={params.max_tokens}")
+            logger.debug(
+                f"[Request] Truncation enabled: max_tokens={params.max_tokens}"
+            )
         else:
-            logger.debug("[Request] No max_tokens found in parameters, model will generate full response")
+            logger.debug(
+                "[Request] No max_tokens found in parameters, model will generate full response"
+            )
 
-        if params.seed: openai_params["seed"] = params.seed
+        if params.seed:
+            openai_params["seed"] = params.seed
 
         # === 处理 Stop Words 兼容性 ===
         # 优先使用 OpenAI 原生 stop 参数
@@ -404,34 +433,54 @@ class DeepSeekProxy:
 
         try:
             if openai_params["stream"]:
-                raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
-                trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
+                raw_resp = await self.client.chat.completions.with_raw_response.create(
+                    **openai_params
+                )
+                trace_id = raw_resp.headers.get(
+                    "X-SiliconCloud-Trace-Id", initial_request_id
+                )
 
                 return StreamingResponse(
                     self._stream_generator(raw_resp.parse(), trace_id),
                     media_type="text/event-stream",
-                    headers={"X-SiliconCloud-Trace-Id": trace_id}
+                    headers={"X-SiliconCloud-Trace-Id": trace_id},
                 )
             else:
-                raw_resp = await self.client.chat.completions.with_raw_response.create(**openai_params)
-                trace_id = raw_resp.headers.get("X-SiliconCloud-Trace-Id", initial_request_id)
+                raw_resp = await self.client.chat.completions.with_raw_response.create(
+                    **openai_params
+                )
+                trace_id = raw_resp.headers.get(
+                    "X-SiliconCloud-Trace-Id", initial_request_id
+                )
                 return self._format_unary_response(raw_resp.parse(), trace_id)
 
         except APIError as e:
-            logger.error(f"[request id: {initial_request_id}] Upstream API Error: {str(e)}")
+            logger.error(
+                f"[request id: {initial_request_id}] Upstream API Error: {str(e)}"
+            )
             error_code = "InternalError"
-            if isinstance(e, RateLimitError): error_code = "Throttling.RateQuota"
-            elif isinstance(e, AuthenticationError): error_code = "InvalidApiKey"
+            if isinstance(e, RateLimitError):
+                error_code = "Throttling.RateQuota"
+            elif isinstance(e, AuthenticationError):
+                error_code = "InvalidApiKey"
 
             return JSONResponse(
                 status_code=e.status_code or 500,
-                content={"code": error_code, "message": str(e), "request_id": initial_request_id}
+                content={
+                    "code": error_code,
+                    "message": str(e),
+                    "request_id": initial_request_id,
+                },
             )
 
-    async def _stream_generator(self, stream, request_id: str) -> AsyncGenerator[str, None]:
+    async def _stream_generator(
+        self, stream, request_id: str
+    ) -> AsyncGenerator[str, None]:
         accumulated_usage = {
-            "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
-            "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0}
+            "total_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0},
         }
         finish_reason = "null"
 
@@ -445,14 +494,19 @@ class DeepSeekProxy:
                 accumulated_usage["output_tokens"] = chunk.usage.completion_tokens
                 details = getattr(chunk.usage, "completion_tokens_details", None)
                 if details:
-                    accumulated_usage["output_tokens_details"]["reasoning_tokens"] = getattr(details, "reasoning_tokens", 0)
+                    accumulated_usage["output_tokens_details"]["reasoning_tokens"] = (
+                        getattr(details, "reasoning_tokens", 0)
+                    )
                     accumulated_usage["output_tokens_details"]["text_tokens"] = (
-                        accumulated_usage["output_tokens"] - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
+                        accumulated_usage["output_tokens"]
+                        - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
                     )
 
             delta = chunk.choices[0].delta if chunk.choices else None
             delta_content = delta.content if delta and delta.content else ""
-            delta_reasoning = (getattr(delta, "reasoning_content", "") or "") if delta else ""
+            delta_reasoning = (
+                (getattr(delta, "reasoning_content", "") or "") if delta else ""
+            )
 
             # ✅ 累积完整内容
             if delta_content:
@@ -478,15 +532,19 @@ class DeepSeekProxy:
             message_body = {
                 "role": "assistant",
                 "content": content_to_send,
-                "reasoning_content": reasoning_to_send
+                "reasoning_content": reasoning_to_send,
             }
             if tool_calls:
                 message_body["tool_calls"] = tool_calls
 
             response_body = {
-                "output": {"choices": [{"message": message_body, "finish_reason": finish_reason}]},
+                "output": {
+                    "choices": [
+                        {"message": message_body, "finish_reason": finish_reason}
+                    ]
+                },
                 "usage": accumulated_usage,
-                "request_id": request_id
+                "request_id": request_id,
             }
             yield f"data: {json.dumps(response_body, ensure_ascii=False)}\n\n"
 
@@ -500,52 +558,67 @@ class DeepSeekProxy:
             "total_tokens": completion.usage.total_tokens,
             "input_tokens": completion.usage.prompt_tokens,
             "output_tokens": completion.usage.completion_tokens,
-            "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0}
+            "output_tokens_details": {"text_tokens": 0, "reasoning_tokens": 0},
         }
         details = getattr(completion.usage, "completion_tokens_details", None)
         if details:
-             usage_data["output_tokens_details"]["reasoning_tokens"] = getattr(details, "reasoning_tokens", 0)
-             usage_data["output_tokens_details"]["text_tokens"] = usage_data["output_tokens"] - usage_data["output_tokens_details"]["reasoning_tokens"]
+            usage_data["output_tokens_details"]["reasoning_tokens"] = getattr(
+                details, "reasoning_tokens", 0
+            )
+            usage_data["output_tokens_details"]["text_tokens"] = (
+                usage_data["output_tokens"]
+                - usage_data["output_tokens_details"]["reasoning_tokens"]
+            )
 
         message_body = {
             "role": msg.role,
             "content": msg.content,
-            "reasoning_content": getattr(msg, "reasoning_content", "")
+            "reasoning_content": getattr(msg, "reasoning_content", ""),
         }
         if msg.tool_calls:
             message_body["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
 
         response_body = {
-            "output": {"choices": [{"message": message_body, "finish_reason": choice.finish_reason}]},
+            "output": {
+                "choices": [
+                    {"message": message_body, "finish_reason": choice.finish_reason}
+                ]
+            },
             "usage": usage_data,
-            "request_id": request_id
+            "request_id": request_id,
         }
 
         return JSONResponse(
-            content=response_body,
-            headers={"X-SiliconCloud-Trace-Id": request_id}
+            content=response_body, headers={"X-SiliconCloud-Trace-Id": request_id}
         )
 
+
 # --- [FastAPI App & Lifecycle] ---
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop_event = threading.Event()
+
     def epoch_clock():
         while not stop_event.is_set():
             time.sleep(5)
             state = SERVER_STATE.snapshot
             if state["active_requests"] > 0 or state["is_mock_mode"]:
-                 logger.info(
+                logger.info(
                     f"[Monitor] Active: {state['active_requests']} | "
                     f"Mode: {'MOCK' if state['is_mock_mode'] else 'PRODUCTION'}"
                 )
+
     monitor_thread = threading.Thread(target=epoch_clock, daemon=True)
     monitor_thread.start()
     yield
     stop_event.set()
 
-def _prepare_proxy_and_headers(request: Request, authorization: Optional[str]) -> tuple[DeepSeekProxy, str]:
+
+def _prepare_proxy_and_headers(
+    request: Request, authorization: Optional[str]
+) -> tuple[DeepSeekProxy, str]:
     """Helper to extract API key, filter headers, and instantiate the proxy."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     api_key = DUMMY_KEY
@@ -554,14 +627,30 @@ def _prepare_proxy_and_headers(request: Request, authorization: Optional[str]) -
         api_key = _MOCK_ENV_API_KEY or "mock-key"
     elif authorization:
         if not authorization.startswith("Bearer "):
-            logger.warning(f"Rejected request {request_id}: Invalid Authorization Format")
-            raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'")
+            logger.warning(
+                f"Rejected request {request_id}: Invalid Authorization Format"
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Authorization header format. Expected 'Bearer <token>'",
+            )
         api_key = authorization.replace("Bearer ", "")
 
     logger.debug(f"using API Key: {api_key[:8]}... for request {request_id}")
 
-    unsafe_headers = {"host", "content-length", "content-type", "authorization", "connection", "upgrade", "accept-encoding", "transfer-encoding"}
-    forward_headers = {k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers}
+    unsafe_headers = {
+        "host",
+        "content-length",
+        "content-type",
+        "authorization",
+        "connection",
+        "upgrade",
+        "accept-encoding",
+        "transfer-encoding",
+    }
+    forward_headers = {
+        k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers
+    }
 
     proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
     return proxy, request_id
@@ -591,8 +680,8 @@ def create_app() -> FastAPI:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": "<400> InternalError.Algo.InvalidParameter: An unknown error occurred due to an unsupported input format."
-                    }
+                        "message": "<400> InternalError.Algo.InvalidParameter: An unknown error occurred due to an unsupported input format.",
+                    },
                 )
 
         logger.error(f"Validation Error: {exc.errors()}")
@@ -602,8 +691,8 @@ def create_app() -> FastAPI:
             status_code=400,
             content={
                 "code": "InvalidParameter",
-                "message": f"<400> InternalError.Algo.InvalidParameter: Parameter {param_name} check failed: {error_msg}"
-            }
+                "message": f"<400> InternalError.Algo.InvalidParameter: Parameter {param_name} check failed: {error_msg}",
+            },
         )
 
     @app.middleware("http")
@@ -618,7 +707,9 @@ def create_app() -> FastAPI:
             duration = (time.time() - start_time) * 1000
             # Reduced log noise for healthy requests, kept for errors or slow ones if needed
             if duration > 1000:
-                logger.warning(f"{request.method} {request.url.path} - SLOW {duration:.2f}ms")
+                logger.warning(
+                    f"{request.method} {request.url.path} - SLOW {duration:.2f}ms"
+                )
 
     @app.get("/health_check")
     async def health_check():
@@ -627,15 +718,15 @@ def create_app() -> FastAPI:
             content={
                 "status": "healthy",
                 "service": "DeepSeek-Proxy",
-                "mode": "mock" if SERVER_STATE.is_mock_mode else "production"
-            }
+                "mode": "mock" if SERVER_STATE.is_mock_mode else "production",
+            },
         )
 
     @app.post("/api/v1/services/aigc/text-generation/generation")
     async def generation(
         request: Request,
         body: GenerationRequest = None,
-        authorization: Optional[str] = Header(None)
+        authorization: Optional[str] = Header(None),
     ):
         proxy, request_id = _prepare_proxy_and_headers(request, authorization)
 
@@ -653,7 +744,6 @@ def create_app() -> FastAPI:
             logger.info("SSE client detected, forcing incremental_output=True")
             body.parameters.incremental_output = True
 
-
         # --- [Mock Handling] ---
         if SERVER_STATE.is_mock_mode:
             if body:
@@ -665,17 +755,23 @@ def create_app() -> FastAPI:
                         # Fire and forget (or await if validation is strict)
                         # await shadow_proxy.generate(body, f"shadow-{request_id}")
                 except Exception:
-                    pass # Swallow shadow errors
+                    pass  # Swallow shadow errors
 
             try:
                 raw_body = await request.json()
                 SERVER_STATE.request_queue.put(raw_body)
                 response_data = SERVER_STATE.response_queue.get(timeout=10)
-                response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
+                response_json = (
+                    json.loads(response_data)
+                    if isinstance(response_data, str)
+                    else response_data
+                )
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
-                return JSONResponse(status_code=500, content={"code": "MockError", "message": str(e)})
+                return JSONResponse(
+                    status_code=500, content={"code": "MockError", "message": str(e)}
+                )
 
         # --- [Production Handling] ---
         # Forward request to upstream
@@ -683,16 +779,14 @@ def create_app() -> FastAPI:
 
     @app.post("/siliconflow/models/{model_path:path}")
     async def dynamic_path_generation(
-        model_path: str,
-        request: Request,
-        authorization: Optional[str] = Header(None)
+        model_path: str, request: Request, authorization: Optional[str] = Header(None)
     ):
         proxy, request_id = _prepare_proxy_and_headers(request, authorization)
 
         # 2. Parse, Inject Model, and Validate
         try:
             payload = await request.json()
-            payload["model"] = model_path # Force set model from URL
+            payload["model"] = model_path  # Force set model from URL
             body = GenerationRequest(**payload)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
@@ -711,20 +805,38 @@ def create_app() -> FastAPI:
             try:
                 body = None
                 if request.method in ["POST", "PUT"]:
-                    try: body = await request.json()
-                    except: pass
-                req_record = {"path": f"/{path_name}", "method": request.method, "headers": dict(request.headers), "body": body}
+                    try:
+                        body = await request.json()
+                    except:
+                        pass
+                req_record = {
+                    "path": f"/{path_name}",
+                    "method": request.method,
+                    "headers": dict(request.headers),
+                    "body": body,
+                }
                 SERVER_STATE.request_queue.put(req_record)
                 response_data = SERVER_STATE.response_queue.get(timeout=5)
-                response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
+                response_json = (
+                    json.loads(response_data)
+                    if isinstance(response_data, str)
+                    else response_data
+                )
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
-                return JSONResponse(status_code=500, content={"error": "Mock Catch-All Error", "detail": str(e)})
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Mock Catch-All Error", "detail": str(e)},
+                )
 
-        return JSONResponse(status_code=404, content={"code": "NotFound", "message": "Proxy endpoint not implemented"})
+        return JSONResponse(
+            status_code=404,
+            content={"code": "NotFound", "message": "Proxy endpoint not implemented"},
+        )
 
     return app
+
 
 def run_server_process(req_q, res_q, host="0.0.0.0", port=8000):
     if req_q and res_q:
@@ -732,30 +844,39 @@ def run_server_process(req_q, res_q, host="0.0.0.0", port=8000):
     app = create_app()
     uvicorn.run(app, host=host, port=port, log_level="info")
 
+
 class MockServer:
     def __init__(self) -> None:
         self.requests = multiprocessing.Queue()
         self.responses = multiprocessing.Queue()
         self.proc = None
 
+
 def create_mock_server(*args, **kwargs):
     mock_server = MockServer()
-    proc = multiprocessing.Process(target=run_server_process, args=(mock_server.requests, mock_server.responses, "0.0.0.0", 8089))
+    proc = multiprocessing.Process(
+        target=run_server_process,
+        args=(mock_server.requests, mock_server.responses, "0.0.0.0", 8089),
+    )
     proc.start()
     mock_server.proc = proc
     time.sleep(1.5)
     logger.info("Mock Server started on port 8089")
     if args and hasattr(args[0], "addfinalizer"):
+
         def stop_server():
             if proc.is_alive():
                 proc.terminate()
                 proc.join()
+
         args[0].addfinalizer(stop_server)
     return mock_server
+
 
 def run_server(host="0.0.0.0", port=8000):
     app = create_app()
     uvicorn.run(app, host=host, port=port)
+
 
 if __name__ == "__main__":
     run_server()
