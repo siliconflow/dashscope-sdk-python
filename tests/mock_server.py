@@ -102,6 +102,7 @@ class InputData(BaseModel):
 class Parameters(BaseModel):
     result_format: str = "message"
     incremental_output: bool = False
+    n: Optional[int] = 1
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 0.8
     top_k: Optional[int] = None
@@ -142,9 +143,10 @@ class DeepSeekProxy:
             api_key = extra_headers["x-api-key"]
 
         kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
+        HOUR = 60 * 60.0
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
-            timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=(2 * HOUR), write=600.0, pool=10.0),
             default_headers=extra_headers,  # 透传 Header
             **kv
         )
@@ -169,6 +171,21 @@ class DeepSeekProxy:
         return messages
 
     async def generate(self, req_data: GenerationRequest, initial_request_id: str):
+        # 0. Pre-computation Validations
+        params = req_data.parameters
+
+        # --- Validate 'n' parameter ---
+        if params.n is not None:
+            if not (1 <= params.n <= 4):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Range of n should be [1, 4]"
+                    }
+                )
+        # -----------------------------------------------
+
         # 0. 提前拦截无效的 Tool Call 链 (Strict Validation)
         # 必须在 _convert_input_to_messages 之前执行，且依赖 req_data.input.messages 的原始结构
         if req_data.input.messages:
@@ -195,7 +212,26 @@ class DeepSeekProxy:
                                 }
                             )
 
-        params = req_data.parameters
+                # --- Check if Tool message is preceded by Assistant (NEW LOGIC) ---
+                if msg.role == "tool":
+                    is_orphan = False
+                    if idx == 0:
+                        is_orphan = True
+                    else:
+                        prev_msg = msgs[idx - 1]
+                        # Must be assistant AND have tool_calls
+                        if prev_msg.role != "assistant" or not getattr(prev_msg, "tool_calls", None):
+                            is_orphan = True
+
+                    if is_orphan:
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "code": "InvalidParameter",
+                                "message": "<400> InternalError.Algo.InvalidParameter: messages with role \"tool\" must be a response to a preceeding message with \"tool_calls\"."
+                            }
+                        )
+                # -----------------------------------------------------
 
         # Validation: Tools require message format
         if params.tools and params.result_format != "message":
@@ -475,13 +511,29 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request, exc):
-        # 提取第一个错误的关键信息，拼接成 DashScope 风格的错误信息
-        error_msg = exc.errors()[0].get("msg", "Invalid parameter")
-        loc = exc.errors()[0].get("loc", [])
+        # 获取第一个错误详情
+        err = exc.errors()[0]
+        error_msg = err.get("msg", "Invalid parameter")
+        loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
+
+        # 当 content 字段接收到非字符串类型（如 list）时，Pydantic 会报 "valid string" 错误
+        # 此时需返回 "unsupported input format" 以匹配测试用例
+        if param_name == "content":
+            # 检查是否是因为传了 List 导致的字符串类型错误
+            # Pydantic v2 的错误消息通常包含 "Input should be a valid string"
+            if "valid string" in error_msg or "str" in error_msg:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: An unknown error occurred due to an unsupported input format."
+                    }
+                )
 
         logger.error(f"Validation Error: {exc.errors()}")
 
+        # 默认错误格式
         return JSONResponse(
             status_code=400,
             content={
