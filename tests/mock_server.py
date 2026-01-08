@@ -430,7 +430,7 @@ class DeepSeekProxy:
         # --- 生成 Curl 命令 (过滤掉非法 Header) ---
         # 1. 基础 Header
         curl_headers = [
-            f"-H 'Authorization: Bearer $SILICONFLOW_API_KEY'",
+            "-H \"Authorization: Bearer ${SILICONFLOW_API_KEY}\"",
             "-H 'Content-Type: application/json'",
         ]
 
@@ -449,7 +449,7 @@ class DeepSeekProxy:
             + f" \\\n  -d '{json.dumps(openai_params, ensure_ascii=False)}'"
         )
 
-        print(f"\n--- [Generated Curl] ---\n{curl_cmd}\n------------------------\n")
+        logger.debug(f"[Curl Command]\n{curl_cmd}")
         # ----------------------------------------------------
 
         try:
