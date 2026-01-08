@@ -151,10 +151,6 @@ class DeepSeekProxy:
         # We instantiate a new client per request to ensure isolation of user credentials
         if extra_headers is None:
             extra_headers = {}
-        logger.debug(
-            "Initializing DeepSeekProxy client with headers: %s",
-            [k for k in extra_headers.keys() if k.lower() != "x-api-key"],
-        )
         if "x-api-key" in extra_headers and extra_headers["x-api-key"]:
             api_key = extra_headers["x-api-key"]
 
@@ -430,6 +426,31 @@ class DeepSeekProxy:
 
             if stop_list:
                 openai_params["stop"] = stop_list
+
+        # --- 生成 Curl 命令 (过滤掉非法 Header) ---
+        # 1. 基础 Header
+        curl_headers = [
+            f"-H 'Authorization: Bearer $SILICONFLOW_API_KEY'",
+            "-H 'Content-Type: application/json'",
+        ]
+
+        # 2. 补充透传的 Header (过滤掉 Omit 对象和不需要的字段)
+        # default_headers 包含了初始化时传入的 extra_headers
+        skip_keys = {"authorization", "content-type", "content-length", "host"}
+        for k, v in self.client.default_headers.items():
+            # 过滤掉 OpenAI 内部的 Omit 对象 和 系统自动生成的头
+            if k.lower() not in skip_keys and not str(v).startswith("<openai."):
+                curl_headers.append(f"-H '{k}: {v}'")
+
+        # 3. 组装命令
+        curl_cmd = (
+            f"curl -X POST {SILICON_FLOW_BASE_URL}/chat/completions \\\n  "
+            + " \\\n  ".join(curl_headers)
+            + f" \\\n  -d '{json.dumps(openai_params, ensure_ascii=False)}'"
+        )
+
+        print(f"\n--- [Generated Curl] ---\n{curl_cmd}\n------------------------\n")
+        # ----------------------------------------------------
 
         try:
             if openai_params["stream"]:
