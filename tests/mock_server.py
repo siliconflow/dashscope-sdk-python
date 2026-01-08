@@ -87,7 +87,12 @@ SERVER_STATE = ServerState.get_instance()
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = ""  # tool_calls 时 content 可能为空
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+
+    model_config = ConfigDict(extra='allow')
 
 class InputData(BaseModel):
     messages: Optional[List[Message]] = None
@@ -164,6 +169,32 @@ class DeepSeekProxy:
         return messages
 
     async def generate(self, req_data: GenerationRequest, initial_request_id: str):
+        # 0. 提前拦截无效的 Tool Call 链 (Strict Validation)
+        # 必须在 _convert_input_to_messages 之前执行，且依赖 req_data.input.messages 的原始结构
+        if req_data.input.messages:
+            msgs = req_data.input.messages
+            for idx, msg in enumerate(msgs):
+                # 检查是否是发起调用的 assistant 消息
+                # 注意：这里依赖 Pydantic 模型中已定义 tool_calls 或者是 extra="allow"
+                has_tool_calls = getattr(msg, "tool_calls", None)
+
+                if msg.role == "assistant" and has_tool_calls:
+                    # 检查下一条消息
+                    next_idx = idx + 1
+                    if next_idx < len(msgs):
+                        next_msg = msgs[next_idx]
+                        # 规则：Assistant call 之后必须紧接 tool 消息
+                        if next_msg.role != "tool":
+                            logger.warning(f"Interceptor caught invalid tool chain at index {next_idx}")
+                            return JSONResponse(
+                                status_code=400,
+                                content={
+                                    "code": "InvalidParameter",
+                                    # 精确匹配错误格式
+                                    "message": f"<400> InternalError.Algo.InvalidParameter: An assistant message with \"tool_calls\" must be followed by tool messages responding to each \"tool_call_id\". The following tool_call_ids did not have response messages: message[{next_idx}].role"
+                                }
+                            )
+
         params = req_data.parameters
 
         # Validation: Tools require message format
