@@ -43,6 +43,8 @@ MODEL_MAPPING = {
 }
 DUMMY_KEY = "dummy-key"
 
+MAX_NUM_MSG_CURL_DUMP = 5  # Controls the max messages shown in curl logs
+
 # --- [Shared State] ---
 
 
@@ -201,24 +203,19 @@ class DeepSeekProxy:
 
         # === [thinking_budget 校验] ===
         if params.thinking_budget is not None:
-            # 必须大于 0 (具体限制取决于上游，但负数肯定是无效的)
             if params.thinking_budget <= 0:
                 return JSONResponse(
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        # 保持与代码库中其他错误一致的格式
                         "message": "<400> InternalError.Algo.InvalidParameter: thinking_budget should be greater than 0",
                     },
                 )
         # ===================================
 
-        # === [新增 response_format 校验逻辑] ===
+        # === [response_format 校验] ===
         if params.response_format:
             rf_type = params.response_format.get("type")
-
-            # 校验 type 值是否合法
-            # 允许的值通常为 json_object 或 text (根据测试用例报错信息)
             if rf_type and rf_type not in ["json_object", "text"]:
                 return JSONResponse(
                     status_code=400,
@@ -228,7 +225,6 @@ class DeepSeekProxy:
                     },
                 )
 
-            # 校验 json_object 下不能包含 json_schema
             if rf_type == "json_object" and "json_schema" in params.response_format:
                 return JSONResponse(
                     status_code=400,
@@ -239,17 +235,13 @@ class DeepSeekProxy:
                 )
         # -----------------------------------------------
 
-        # 0. 提前拦截无效的 Tool Call 链 (Strict Validation)
-        # 必须在 _convert_input_to_messages 之前执行，且依赖 req_data.input.messages 的原始结构
+        # 0. 提前拦截无效的 Tool Call 链
         if req_data.input.messages:
             msgs = req_data.input.messages
             for idx, msg in enumerate(msgs):
-                # 检查是否是发起调用的 assistant 消息
-                # 注意：这里依赖 Pydantic 模型中已定义 tool_calls 或者是 extra="allow"
                 has_tool_calls = getattr(msg, "tool_calls", None)
 
                 if msg.role == "assistant" and has_tool_calls:
-                    # 检查下一条消息
                     next_idx = idx + 1
                     if next_idx < len(msgs):
                         next_msg = msgs[next_idx]
@@ -262,12 +254,10 @@ class DeepSeekProxy:
                                 status_code=400,
                                 content={
                                     "code": "InvalidParameter",
-                                    # 精确匹配错误格式
                                     "message": f'<400> InternalError.Algo.InvalidParameter: An assistant message with "tool_calls" must be followed by tool messages responding to each "tool_call_id". The following tool_call_ids did not have response messages: message[{next_idx}].role',
                                 },
                             )
 
-                # --- Check if Tool message is preceded by Assistant (NEW LOGIC) ---
                 if msg.role == "tool":
                     is_orphan = False
                     if idx == 0:
@@ -288,7 +278,6 @@ class DeepSeekProxy:
                                 "message": '<400> InternalError.Algo.InvalidParameter: messages with role "tool" must be a response to a preceeding message with "tool_calls".',
                             },
                         )
-                # -----------------------------------------------------
 
         # Validation: Tools require message format
         if params.tools and params.result_format != "message":
@@ -322,10 +311,8 @@ class DeepSeekProxy:
             "stream": params.incremental_output or params.enable_thinking,
         }
 
-        # === [将合法的 response_format 加入请求参数] ===
         if params.response_format:
             openai_params["response_format"] = params.response_format
-        # ----------------------------------------------------
 
         if params.frequency_penalty is not None:
             openai_params["frequency_penalty"] = params.frequency_penalty
@@ -368,9 +355,9 @@ class DeepSeekProxy:
             # 如果用户传 0，通常对应 disable (即 -1) 或由模型决定，这里映射为 -1 比较稳妥
             # 如果用户传 > 100 (如 1025)，必须截断为 100，否则上游报错
             if params.top_k == 0:
-                extra_body["top_k"] = -1  # Disable
+                extra_body["top_k"] = -1
             elif params.top_k > 100:
-                extra_body["top_k"] = 100  # Clamp to max supported by upstream
+                extra_body["top_k"] = 100
             else:
                 extra_body["top_k"] = params.top_k
 
@@ -379,7 +366,6 @@ class DeepSeekProxy:
             # 确保只有在开启思考时才透传 budget，且前面已经校验过 >0
             # 如果上游明确支持 thinking_budget 字段：
             extra_body["thinking_budget"] = params.thinking_budget
-        # ===============================================
 
         if extra_body:
             openai_params["extra_body"] = extra_body
@@ -427,26 +413,37 @@ class DeepSeekProxy:
             if stop_list:
                 openai_params["stop"] = stop_list
 
-        # --- 生成 Curl 命令 (过滤掉非法 Header) ---
+        # --- 生成 Curl 命令 (过滤掉非法 Header & Truncate Log) ---
         # 1. 基础 Header
         curl_headers = [
             '-H "Authorization: Bearer ${SILICONFLOW_API_KEY}"',
             "-H 'Content-Type: application/json'",
         ]
 
-        # 2. 补充透传的 Header (过滤掉 Omit 对象和不需要的字段)
-        # default_headers 包含了初始化时传入的 extra_headers
+        # 2. 补充透传的 Header
         skip_keys = {"authorization", "content-type", "content-length", "host"}
         for k, v in self.client.default_headers.items():
-            # 过滤掉 OpenAI 内部的 Omit 对象 和 系统自动生成的头
             if k.lower() not in skip_keys and not str(v).startswith("<openai."):
                 curl_headers.append(f"-H '{k}: {v}'")
 
-        # 3. 组装命令
+        # 3. 准备 Logging 专用 Payload (如果消息太长则截断)
+        log_payload = openai_params.copy()
+        msg_list = log_payload.get("messages", [])
+        if len(msg_list) > MAX_NUM_MSG_CURL_DUMP:
+            # 截断展示: 只保留前 N 条，并添加说明
+            truncated_msgs = msg_list[:MAX_NUM_MSG_CURL_DUMP]
+            truncated_msgs.append(
+                {
+                    "_log_truncation": f"... {len(msg_list) - MAX_NUM_MSG_CURL_DUMP} messages omitted for brevity ..."
+                }
+            )
+            log_payload["messages"] = truncated_msgs
+
+        # 4. 组装命令
         curl_cmd = (
             f"curl -X POST {SILICON_FLOW_BASE_URL}/chat/completions \\\n  "
             + " \\\n  ".join(curl_headers)
-            + f" \\\n  -d '{json.dumps(openai_params, ensure_ascii=False)}'"
+            + f" \\\n  -d '{json.dumps(log_payload, ensure_ascii=False)}'"
         )
 
         logger.debug(f"[Curl Command]\n{curl_cmd}")
