@@ -345,6 +345,14 @@ class DeepSeekProxy:
         if params.tools:
             openai_params["tools"] = params.tools
             if params.tool_choice:
+                if isinstance(params.tool_choice, str) and params.tool_choice == "null":
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": "<400> InternalError.Algo.InvalidParameter: Invalid tool_choice. It must be 'none', 'auto', or a valid object, not the string 'null'."
+                        }
+                    )
                 openai_params["tool_choice"] = params.tool_choice
 
         if params.max_tokens is not None:
