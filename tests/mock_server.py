@@ -140,9 +140,9 @@ class GenerationRequest(BaseModel):
 class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         # We instantiate a new client per request to ensure isolation of user credentials
-        logger.debug("Initializing DeepSeekProxy client with headers: %s", extra_headers)
         if extra_headers is None:
             extra_headers = {}
+        logger.debug("Initializing DeepSeekProxy client with headers: %s", [k for k in extra_headers.keys() if k.lower() != "x-api-key"])
         if "x-api-key" in extra_headers and extra_headers["x-api-key"]:
             api_key = extra_headers["x-api-key"]
 
