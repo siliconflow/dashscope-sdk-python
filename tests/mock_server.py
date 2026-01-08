@@ -123,6 +123,10 @@ class Parameters(BaseModel):
     thinking_budget: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+
+    # === response_format 字段] ===
+    response_format: Optional[Dict[str, Any]] = None
+
     # 显式开启从属性名读取
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
@@ -182,6 +186,31 @@ class DeepSeekProxy:
                     content={
                         "code": "InvalidParameter",
                         "message": "<400> InternalError.Algo.InvalidParameter: Range of n should be [1, 4]"
+                    }
+                )
+
+        # === [新增 response_format 校验逻辑] ===
+        if params.response_format:
+            rf_type = params.response_format.get("type")
+
+            # 校验 type 值是否合法
+            # 允许的值通常为 json_object 或 text (根据测试用例报错信息)
+            if rf_type and rf_type not in ["json_object", "text"]:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": f"<400> InternalError.Algo.InvalidParameter: 'response_format.type' Invalid value: '{rf_type}'. Supported values are: 'json_object' and 'text'."
+                    }
+                )
+
+            # 校验 json_object 下不能包含 json_schema
+            if rf_type == "json_object" and "json_schema" in params.response_format:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Unknown parameter: 'response_format.json_schema'. 'response_format.json_schema' cannot be provided when 'response_format.type' is 'json_object'."
                     }
                 )
         # -----------------------------------------------
@@ -258,6 +287,11 @@ class DeepSeekProxy:
             "top_p": params.top_p,
             "stream": params.incremental_output or params.enable_thinking,
         }
+
+        # === [将合法的 response_format 加入请求参数] ===
+        if params.response_format:
+            openai_params["response_format"] = params.response_format
+        # ----------------------------------------------------
 
         if params.frequency_penalty is not None:
             openai_params["frequency_penalty"] = params.frequency_penalty
