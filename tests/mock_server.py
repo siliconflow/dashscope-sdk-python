@@ -303,7 +303,7 @@ class DeepSeekProxy:
         # 不是 OpenAI 标准参数，必须放入 extra_body
         # === [校验与修正逻辑] ===
 
-        # 1. 校验 repetition_penalty (解决 deepseek_case_22)
+        # 1. 校验 repetition_penalty
         # DashScope 要求 > 0.0，否则报错 InvalidParameter
         if params.repetition_penalty is not None:
             if params.repetition_penalty <= 0:
@@ -318,7 +318,7 @@ class DeepSeekProxy:
 
         # 2. 校验 top_k
         if params.top_k is not None:
-            # 2.1 负数校验 (解决 deepseek_case_18)
+            # 2.1 负数校验
             # 此时 Pydantic 已经确保它是 int，这里检查数值
             if params.top_k < 0:
                 return JSONResponse(
@@ -329,7 +329,7 @@ class DeepSeekProxy:
                     }
                 )
 
-            # 2.2 上限截断 (解决 deepseek_case_28)
+            # 2.2 上限截断
             # SiliconFlow 限制 top_k 为 [1, 100]。
             # 如果用户传 0，通常对应 disable (即 -1) 或由模型决定，这里映射为 -1 比较稳妥
             # 如果用户传 > 100 (如 1025)，必须截断为 100，否则上游报错
