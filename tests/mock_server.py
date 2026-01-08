@@ -189,6 +189,20 @@ class DeepSeekProxy:
                     }
                 )
 
+        # === [thinking_budget 校验] ===
+        if params.thinking_budget is not None:
+            # 必须大于 0 (具体限制取决于上游，但负数肯定是无效的)
+            if params.thinking_budget <= 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        # 保持与代码库中其他错误一致的格式
+                        "message": "<400> InternalError.Algo.InvalidParameter: thinking_budget should be greater than 0"
+                    }
+                )
+        # ===================================
+
         # === [新增 response_format 校验逻辑] ===
         if params.response_format:
             rf_type = params.response_format.get("type")
@@ -339,6 +353,14 @@ class DeepSeekProxy:
                 extra_body["top_k"] = 100 # Clamp to max supported by upstream
             else:
                 extra_body["top_k"] = params.top_k
+
+        # === [将 thinking_budget 加入 extra_body] ===
+        if params.enable_thinking and params.thinking_budget is not None:
+             # 确保只有在开启思考时才透传 budget，且前面已经校验过 >0
+             # 如果上游明确支持 thinking_budget 字段：
+             extra_body["thinking_budget"] = params.thinking_budget
+        # ===============================================
+
         if extra_body:
             openai_params["extra_body"] = extra_body
 
