@@ -756,10 +756,13 @@ def create_app() -> FastAPI:
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
-        # --- [Auto-enable stream mode based on header] ---
+        # --- [Auto-enable stream mode based on headers] ---
+        # 检查传统的 Accept Header 或者 DashScope 特有的 X-DashScope-SSE Header
         accept_header = request.headers.get("accept", "")
-        if "text/event-stream" in accept_header and body.parameters:
-            logger.info("SSE client detected, forcing incremental_output=True")
+        dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
+
+        if ("text/event-stream" in accept_header or dashscope_sse == "enable") and body.parameters:
+            logger.debug(f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream")
             body.parameters.incremental_output = True
 
         # --- [Mock Handling] ---
@@ -810,7 +813,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
 
         # 3. Handle SSE
-        if "text/event-stream" in request.headers.get("accept", "") and body.parameters:
+        # 检查传统的 Accept Header 或者 DashScope 特有的 X-DashScope-SSE Header
+        accept_header = request.headers.get("accept", "")
+        dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
+
+        if ("text/event-stream" in accept_header or dashscope_sse == "enable") and body.parameters:
+            logger.debug(f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream")
             body.parameters.incremental_output = True
 
         # 4. Generate
