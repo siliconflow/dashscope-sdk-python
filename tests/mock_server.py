@@ -94,7 +94,7 @@ SERVER_STATE = ServerState.get_instance()
 
 class Message(BaseModel):
     role: str
-    content: Optional[str] = ""  # tool_calls 时 content 可能为空
+    content: Optional[str] = ""  # content can be empty when using tool_calls
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
@@ -123,19 +123,19 @@ class Parameters(BaseModel):
     presence_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.0
 
-    # OpenAI原生格式
+    # OpenAI native format
     stop: Optional[Union[str, List[str]]] = None
-    # DashScope兼容格式
+    # DashScope compatible format
     stop_words: Optional[List[Dict[str, Any]]] = None
     enable_thinking: bool = False
     thinking_budget: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
-    # === response_format 字段] ===
+    # === [response_format field] ===
     response_format: Optional[Dict[str, Any]] = None
 
-    # 显式开启从属性名读取
+    # Explicitly enable reading from attribute name
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
@@ -163,7 +163,7 @@ class DeepSeekProxy:
             timeout=httpx.Timeout(
                 connect=10.0, read=(2 * HOUR), write=600.0, pool=10.0
             ),
-            default_headers=extra_headers,  # 透传 Header
+            default_headers=extra_headers,  # Pass through headers
             **kv,
         )
 
@@ -201,7 +201,7 @@ class DeepSeekProxy:
                     },
                 )
 
-        # === [thinking_budget 校验] ===
+        # === [thinking_budget validation] ===
         if params.thinking_budget is not None:
             if params.thinking_budget <= 0:
                 return JSONResponse(
@@ -213,7 +213,7 @@ class DeepSeekProxy:
                 )
         # ===================================
 
-        # === [response_format 校验] ===
+        # === [response_format validation] ===
         if params.response_format:
             rf_type = params.response_format.get("type")
             if rf_type and rf_type not in ["json_object", "text"]:
@@ -235,7 +235,7 @@ class DeepSeekProxy:
                 )
         # -----------------------------------------------
 
-        # 0. 提前拦截无效的 Tool Call 链
+        # 0. Preemptively intercept invalid Tool Call chains
         if req_data.input.messages:
             msgs = req_data.input.messages
             for idx, msg in enumerate(msgs):
@@ -245,7 +245,7 @@ class DeepSeekProxy:
                     next_idx = idx + 1
                     if next_idx < len(msgs):
                         next_msg = msgs[next_idx]
-                        # 规则：Assistant call 之后必须紧接 tool 消息
+                        # Rule: Assistant call must be immediately followed by tool messages
                         if next_msg.role != "tool":
                             logger.warning(
                                 f"Interceptor caught invalid tool chain at index {next_idx}"
@@ -321,11 +321,11 @@ class DeepSeekProxy:
             openai_params["presence_penalty"] = params.presence_penalty
 
         extra_body = {}
-        # 不是 OpenAI 标准参数，必须放入 extra_body
-        # === [校验与修正逻辑] ===
+        # Not an OpenAI standard parameter, must be put into extra_body
+        # === [Validation and Correction Logic] ===
 
-        # 1. 校验 repetition_penalty
-        # DashScope 要求 > 0.0，否则报错 InvalidParameter
+        # 1. Validate repetition_penalty
+        # DashScope requires > 0.0, otherwise InvalidParameter error
         if params.repetition_penalty is not None:
             if params.repetition_penalty <= 0:
                 return JSONResponse(
@@ -337,10 +337,10 @@ class DeepSeekProxy:
                 )
             extra_body["repetition_penalty"] = params.repetition_penalty
 
-        # 2. 校验 top_k
+        # 2. Validate top_k
         if params.top_k is not None:
-            # 2.1 负数校验
-            # 此时 Pydantic 已经确保它是 int，这里检查数值
+            # 2.1 Negative number validation
+            # Pydantic has ensured it is an int, checking value here
             if params.top_k < 0:
                 return JSONResponse(
                     status_code=400,
@@ -350,10 +350,10 @@ class DeepSeekProxy:
                     },
                 )
 
-            # 2.2 上限截断
-            # SiliconFlow 限制 top_k 为 [1, 100]。
-            # 如果用户传 0，通常对应 disable (即 -1) 或由模型决定，这里映射为 -1 比较稳妥
-            # 如果用户传 > 100 (如 1025)，必须截断为 100，否则上游报错
+            # 2.2 Upper limit truncation
+            # SiliconFlow limits top_k to [1, 100].
+            # If user passes 0, usually corresponds to disable (i.e. -1) or model decision; mapping to -1 here is safer.
+            # If user passes > 100 (e.g., 1025), must truncate to 100, otherwise upstream errors.
             if params.top_k == 0:
                 extra_body["top_k"] = -1
             elif params.top_k > 100:
@@ -361,10 +361,10 @@ class DeepSeekProxy:
             else:
                 extra_body["top_k"] = params.top_k
 
-        # === [将 thinking_budget 加入 extra_body] ===
+        # === [Add thinking_budget to extra_body] ===
         if params.enable_thinking and params.thinking_budget is not None:
-            # 确保只有在开启思考时才透传 budget，且前面已经校验过 >0
-            # 如果上游明确支持 thinking_budget 字段：
+            # Ensure budget is passed only when thinking is enabled, and validated >0 previously
+            # If upstream explicitly supports thinking_budget field:
             extra_body["thinking_budget"] = params.thinking_budget
 
         if extra_body:
@@ -396,41 +396,41 @@ class DeepSeekProxy:
         if params.seed:
             openai_params["seed"] = params.seed
 
-        # === 处理 Stop Words 兼容性 ===
-        # 优先使用 OpenAI 原生 stop 参数
+        # === Handle Stop Words Compatibility ===
+        # Prioritize OpenAI native stop parameter
         if params.stop:
             openai_params["stop"] = params.stop
-        # 如果没有 stop 但有 stop_words (DashScope 格式)，则进行转换
+        # If no stop but stop_words exists (DashScope format), convert it
         elif params.stop_words:
-            # 提取所有 mode="exclude" (默认) 的 stop_str
-            # 注意：DashScope 的 stop_words 是 list[dict] 结构
+            # Extract all stop_str with mode='exclude' (default)
+            # Note: DashScope's stop_words is a list[dict] structure
             stop_list = []
             for sw in params.stop_words:
-                # 仅处理 exclude 模式或未指定模式的词
+                # Only handle exclude mode or unspecified mode words
                 if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
                     stop_list.append(sw["stop_str"])
 
             if stop_list:
                 openai_params["stop"] = stop_list
 
-        # --- 生成 Curl 命令 (过滤掉非法 Header & Truncate Log) ---
-        # 1. 基础 Header
+        # --- Generate Curl Command (Filter illegal Headers & Truncate Log) ---
+        # 1. Base Header
         curl_headers = [
             '-H "Authorization: Bearer ${SILICONFLOW_API_KEY}"',
             "-H 'Content-Type: application/json'",
         ]
 
-        # 2. 补充透传的 Header
+        # 2. Supplement pass-through Headers
         skip_keys = {"authorization", "content-type", "content-length", "host"}
         for k, v in self.client.default_headers.items():
             if k.lower() not in skip_keys and not str(v).startswith("<openai."):
                 curl_headers.append(f"-H '{k}: {v}'")
 
-        # 3. 准备 Logging 专用 Payload (如果消息太长则截断)
+        # 3. Prepare Logging Payload (Truncate if message too long)
         log_payload = openai_params.copy()
         msg_list = log_payload.get("messages", [])
         if len(msg_list) > MAX_NUM_MSG_CURL_DUMP:
-            # 截断展示: 只保留前 N 条，并添加说明
+            # Truncation display: keep only first N items, add explanation
             truncated_msgs = msg_list[:MAX_NUM_MSG_CURL_DUMP]
             truncated_msgs.append(
                 {
@@ -439,7 +439,7 @@ class DeepSeekProxy:
             )
             log_payload["messages"] = truncated_msgs
 
-        # 4. 组装命令
+        # 4. Assemble command
         curl_cmd = (
             f"curl -X POST {SILICON_FLOW_BASE_URL}/chat/completions \\\n  "
             + " \\\n  ".join(curl_headers)
@@ -526,7 +526,7 @@ class DeepSeekProxy:
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
 
-            # ✅ 累积完整内容
+            # ✅ Accumulate full content
             if delta_content:
                 full_text += delta_content
             if delta_reasoning:
@@ -539,7 +539,7 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            # ✅ 关键：stop 包输出“完整累积内容”，避免最后一包是空导致聚合为空
+            # ✅ Key: stop packet outputs "full accumulated content" to avoid empty aggregation if last packet is empty
             if finish_reason != "null":
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
@@ -682,17 +682,17 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request, exc):
-        # 获取第一个错误详情
+        # Get first error detail
         err = exc.errors()[0]
         error_msg = err.get("msg", "Invalid parameter")
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
 
-        # 当 content 字段接收到非字符串类型（如 list）时，Pydantic 会报 "valid string" 错误
-        # 此时需返回 "unsupported input format" 以匹配测试用例
+        # When content field receives non-string type (e.g. list), Pydantic reports "valid string" error
+        # Return "unsupported input format" to match test cases
         if param_name == "content":
-            # 检查是否是因为传了 List 导致的字符串类型错误
-            # Pydantic v2 的错误消息通常包含 "Input should be a valid string"
+            # Check if string type error caused by passing List
+            # Pydantic v2 error messages usually contain "Input should be a valid string"
             if "valid string" in error_msg or "str" in error_msg:
                 return JSONResponse(
                     status_code=400,
@@ -704,7 +704,7 @@ def create_app() -> FastAPI:
 
         logger.error(f"Validation Error: {exc.errors()}")
 
-        # 默认错误格式
+        # Default error format
         return JSONResponse(
             status_code=400,
             content={
@@ -757,12 +757,16 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
         # --- [Auto-enable stream mode based on headers] ---
-        # 检查传统的 Accept Header 或者 DashScope 特有的 X-DashScope-SSE Header
+        # Check traditional Accept Header or DashScope specific X-DashScope-SSE Header
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
-        if ("text/event-stream" in accept_header or dashscope_sse == "enable") and body.parameters:
-            logger.debug(f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream")
+        if (
+            "text/event-stream" in accept_header or dashscope_sse == "enable"
+        ) and body.parameters:
+            logger.debug(
+                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream"
+            )
             body.parameters.incremental_output = True
 
         # --- [Mock Handling] ---
@@ -813,12 +817,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
 
         # 3. Handle SSE
-        # 检查传统的 Accept Header 或者 DashScope 特有的 X-DashScope-SSE Header
+        # Check traditional Accept Header or DashScope specific X-DashScope-SSE Header
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
-        if ("text/event-stream" in accept_header or dashscope_sse == "enable") and body.parameters:
-            logger.debug(f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream")
+        if (
+            "text/event-stream" in accept_header or dashscope_sse == "enable"
+        ) and body.parameters:
+            logger.debug(
+                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream"
+            )
             body.parameters.incremental_output = True
 
         # 4. Generate
