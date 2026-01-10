@@ -1,4 +1,3 @@
-import httpx
 import os
 import json
 import time
@@ -9,6 +8,7 @@ import multiprocessing
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
+# --- Logging Configuration ---
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
@@ -24,10 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DeepSeekProxy")
 
+# --- Constants & Environment Variables ---
 SILICON_FLOW_BASE_URL = os.getenv(
     "SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1"
 )
-
 _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 MODEL_MAPPING = {
@@ -37,11 +38,12 @@ MODEL_MAPPING = {
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
     "default": "deepseek-ai/DeepSeek-V3",
 }
-DUMMY_KEY = "dummy-key"
 
+DUMMY_KEY = "dummy-key"
 MAX_NUM_MSG_CURL_DUMP = 5
 
 
+# --- Server State Management ---
 class ServerState:
     _instance = None
 
@@ -84,6 +86,7 @@ class ServerState:
 SERVER_STATE = ServerState.get_instance()
 
 
+# --- Pydantic Models ---
 class Message(BaseModel):
     role: str
     content: Optional[str] = ""
@@ -133,6 +136,7 @@ class GenerationRequest(BaseModel):
     parameters: Optional[Parameters] = Field(default_factory=Parameters)
 
 
+# --- DeepSeek Proxy Logic ---
 class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         if extra_headers is None:
@@ -178,6 +182,7 @@ class DeepSeekProxy:
     ):
         params = req_data.parameters
 
+        # --- Validation Logic ---
         if params.n is not None:
             if not (1 <= params.n <= 4):
                 return JSONResponse(
@@ -278,10 +283,11 @@ class DeepSeekProxy:
                 },
             )
 
+        # --- Request Preparation ---
         target_model = self._get_mapped_model(req_data.model)
         messages = self._convert_input_to_messages(req_data.input)
 
-        # 核心修改：流式开启条件 = 参数要求增量 OR 开启思考 OR 外部强制流式(SSE)
+        # Stream enablement condition = parameter requires incremental OR thinking enabled OR external forced stream (SSE)
         should_stream = (
             params.incremental_output or params.enable_thinking or force_stream
         )
@@ -291,7 +297,7 @@ class DeepSeekProxy:
             "messages": messages,
             "temperature": params.temperature,
             "top_p": params.top_p,
-            "stream": should_stream,  # 使用计算后的 stream 状态
+            "stream": should_stream,  # Use calculated stream status
         }
 
         if params.response_format:
@@ -376,6 +382,7 @@ class DeepSeekProxy:
             if stop_list:
                 openai_params["stop"] = stop_list
 
+        # --- Debug Logging (CURL generation) ---
         curl_headers = [
             '-H "Authorization: Bearer ${SILICONFLOW_API_KEY}"',
             "-H 'Content-Type: application/json'",
@@ -405,6 +412,7 @@ class DeepSeekProxy:
 
         logger.debug(f"[Curl Command]\n{curl_cmd}")
 
+        # --- Execution ---
         try:
             if openai_params["stream"]:
                 raw_resp = await self.client.chat.completions.with_raw_response.create(
@@ -414,9 +422,8 @@ class DeepSeekProxy:
                     "X-SiliconCloud-Trace-Id", initial_request_id
                 )
 
-                # 核心修改：传入 is_incremental 标志
-                # 如果 params.incremental_output 为 True，则返回增量 (Delta)
-                # 如果 params.incremental_output 为 False，则返回全量 (Accumulated)
+                # If params.incremental_output is True, return incremental (Delta)
+                # If params.incremental_output is False, return full text (Accumulated)
                 return StreamingResponse(
                     self._stream_generator(
                         raw_resp.parse(),
@@ -501,17 +508,16 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            # === 核心逻辑修改 ===
-            # 根据 is_incremental 决定发送的内容
+            # Decide what content to send based on is_incremental
             if is_incremental:
-                # 模式：增量 (Delta)
-                # 修复 BUG：即使是最后一包(finish_reason != null)，也只发 delta，
-                # 只有 delta 有内容才发内容，否则发空字符串。
+                # Mode: Incremental (Delta)
+                # Bug Fix: Even if it is the last packet (finish_reason != null), only send delta.
+                # Only send content if delta has content, otherwise send empty string.
                 content_to_send = delta_content
                 reasoning_to_send = delta_reasoning
             else:
-                # 模式：全量 (Accumulated)
-                # 每一包都返回当前累积的完整文本
+                # Mode: Full (Accumulated)
+                # Every packet returns the full accumulated text so far.
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
 
@@ -579,6 +585,7 @@ class DeepSeekProxy:
         )
 
 
+# --- FastAPI Application Lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop_event = threading.Event()
@@ -725,7 +732,7 @@ def create_app() -> FastAPI:
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
-        # 修改：检测是否需要强制流式传输（SSE），但不修改用户的 incremental_output 参数
+        # but do not modify the user's incremental_output parameter.
         force_stream = False
         if (
             "text/event-stream" in accept_header or dashscope_sse == "enable"
@@ -734,7 +741,7 @@ def create_app() -> FastAPI:
                 f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream transport"
             )
             force_stream = True
-            # 注意：这里删除了 body.parameters.incremental_output = True 这一行
+            # Note: The line `body.parameters.incremental_output = True` was removed here.
 
         if SERVER_STATE.is_mock_mode:
             if body:
@@ -760,7 +767,7 @@ def create_app() -> FastAPI:
                     status_code=500, content={"code": "MockError", "message": str(e)}
                 )
 
-        # 传入 force_stream
+        # Pass force_stream to generate
         return await proxy.generate(body, request_id, force_stream=force_stream)
 
     @app.post("/siliconflow/models/{model_path:path}")
@@ -779,7 +786,6 @@ def create_app() -> FastAPI:
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
-        # 修改：同上，使用 force_stream
         force_stream = False
         if (
             "text/event-stream" in accept_header or dashscope_sse == "enable"
@@ -830,6 +836,7 @@ def create_app() -> FastAPI:
     return app
 
 
+# --- Mock Server Utilities ---
 def run_server_process(req_q, res_q, host="0.0.0.0", port=8000):
     if req_q and res_q:
         SERVER_STATE.set_queues(req_q, res_q)
