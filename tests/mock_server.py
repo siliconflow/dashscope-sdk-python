@@ -170,7 +170,12 @@ class DeepSeekProxy:
             messages.append({"role": "user", "content": input_data.prompt})
         return messages
 
-    async def generate(self, req_data: GenerationRequest, initial_request_id: str):
+    async def generate(
+        self,
+        req_data: GenerationRequest,
+        initial_request_id: str,
+        force_stream: bool = False,
+    ):
         params = req_data.parameters
 
         if params.n is not None:
@@ -276,12 +281,17 @@ class DeepSeekProxy:
         target_model = self._get_mapped_model(req_data.model)
         messages = self._convert_input_to_messages(req_data.input)
 
+        # 核心修改：流式开启条件 = 参数要求增量 OR 开启思考 OR 外部强制流式(SSE)
+        should_stream = (
+            params.incremental_output or params.enable_thinking or force_stream
+        )
+
         openai_params = {
             "model": target_model,
             "messages": messages,
             "temperature": params.temperature,
             "top_p": params.top_p,
-            "stream": params.incremental_output or params.enable_thinking,
+            "stream": should_stream,  # 使用计算后的 stream 状态
         }
 
         if params.response_format:
@@ -404,8 +414,15 @@ class DeepSeekProxy:
                     "X-SiliconCloud-Trace-Id", initial_request_id
                 )
 
+                # 核心修改：传入 is_incremental 标志
+                # 如果 params.incremental_output 为 True，则返回增量 (Delta)
+                # 如果 params.incremental_output 为 False，则返回全量 (Accumulated)
                 return StreamingResponse(
-                    self._stream_generator(raw_resp.parse(), trace_id),
+                    self._stream_generator(
+                        raw_resp.parse(),
+                        trace_id,
+                        is_incremental=params.incremental_output,
+                    ),
                     media_type="text/event-stream",
                     headers={"X-SiliconCloud-Trace-Id": trace_id},
                 )
@@ -438,7 +455,7 @@ class DeepSeekProxy:
             )
 
     async def _stream_generator(
-        self, stream, request_id: str
+        self, stream, request_id: str, is_incremental: bool
     ) -> AsyncGenerator[str, None]:
         accumulated_usage = {
             "total_tokens": 0,
@@ -484,12 +501,19 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            if finish_reason != "null":
-                content_to_send = full_text
-                reasoning_to_send = full_reasoning
-            else:
+            # === 核心逻辑修改 ===
+            # 根据 is_incremental 决定发送的内容
+            if is_incremental:
+                # 模式：增量 (Delta)
+                # 修复 BUG：即使是最后一包(finish_reason != null)，也只发 delta，
+                # 只有 delta 有内容才发内容，否则发空字符串。
                 content_to_send = delta_content
                 reasoning_to_send = delta_reasoning
+            else:
+                # 模式：全量 (Accumulated)
+                # 每一包都返回当前累积的完整文本
+                content_to_send = full_text
+                reasoning_to_send = full_reasoning
 
             message_body = {
                 "role": "assistant",
@@ -701,13 +725,16 @@ def create_app() -> FastAPI:
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
+        # 修改：检测是否需要强制流式传输（SSE），但不修改用户的 incremental_output 参数
+        force_stream = False
         if (
             "text/event-stream" in accept_header or dashscope_sse == "enable"
         ) and body.parameters:
             logger.debug(
-                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream"
+                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream transport"
             )
-            body.parameters.incremental_output = True
+            force_stream = True
+            # 注意：这里删除了 body.parameters.incremental_output = True 这一行
 
         if SERVER_STATE.is_mock_mode:
             if body:
@@ -733,7 +760,8 @@ def create_app() -> FastAPI:
                     status_code=500, content={"code": "MockError", "message": str(e)}
                 )
 
-        return await proxy.generate(body, request_id)
+        # 传入 force_stream
+        return await proxy.generate(body, request_id, force_stream=force_stream)
 
     @app.post("/siliconflow/models/{model_path:path}")
     async def dynamic_path_generation(
@@ -751,15 +779,17 @@ def create_app() -> FastAPI:
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
+        # 修改：同上，使用 force_stream
+        force_stream = False
         if (
             "text/event-stream" in accept_header or dashscope_sse == "enable"
         ) and body.parameters:
             logger.debug(
-                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream"
+                f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream transport"
             )
-            body.parameters.incremental_output = True
+            force_stream = True
 
-        return await proxy.generate(body, request_id)
+        return await proxy.generate(body, request_id, force_stream=force_stream)
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
