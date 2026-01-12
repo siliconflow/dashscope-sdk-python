@@ -132,7 +132,7 @@ class Parameters(BaseModel):
 
 class GenerationRequest(BaseModel):
     model: str
-    input: InputData
+    input: Optional[InputData] = None
     parameters: Optional[Parameters] = Field(default_factory=Parameters)
 
 
@@ -180,6 +180,25 @@ class DeepSeekProxy:
         initial_request_id: str,
         force_stream: bool = False,
     ):
+        # --- Input Content Validation (Case: testNonInputByCode) ---
+        has_input = req_data.input is not None
+        has_content = False
+        if has_input:
+            has_content = (
+                bool(req_data.input.messages)
+                or bool(req_data.input.prompt)
+                or bool(req_data.input.history)
+            )
+
+        if not has_input or not has_content:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": '<400> InternalError.Algo.InvalidParameter: Either "prompt" or "messages" must exist and cannot both be none',
+                },
+            )
+
         params = req_data.parameters
 
         # --- Validation Logic ---
@@ -667,6 +686,16 @@ def create_app() -> FastAPI:
         error_msg = err.get("msg", "Invalid parameter")
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
+
+        # --- Handle Missing Model (Case: testEmptyMsgByCode) ---
+        if "model" in loc and err.get("type") == "missing":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "BadRequest.EmptyModel",
+                    "message": 'Required parameter "model" missing from request.'
+                },
+            )
 
         if param_name == "content":
             if "valid string" in error_msg or "str" in error_msg:
