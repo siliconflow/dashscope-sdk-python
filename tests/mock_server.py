@@ -89,7 +89,7 @@ SERVER_STATE = ServerState.get_instance()
 # --- Pydantic Models ---
 class Message(BaseModel):
     role: str
-    content: Optional[str] = ""
+    content: Optional[Union[str, List[Dict[str, Any]]]] = ""
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
@@ -198,7 +198,10 @@ class DeepSeekProxy:
         has_content = False
         if has_input:
             # Strict mutual exclusion check
-            if req_data.input.messages is not None and req_data.input.prompt is not None:
+            if (
+                req_data.input.messages is not None
+                and req_data.input.prompt is not None
+            ):
                 return JSONResponse(
                     status_code=400,
                     content={
