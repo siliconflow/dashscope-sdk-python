@@ -758,12 +758,13 @@ def create_app() -> FastAPI:
             )
 
         # Catch generic typing errors for content (including lists passed to str)
-        if param_name == "content":
+        if param_name == "content" or (len(loc) > 1 and loc[-2] == "content"):
             if (
                 "valid string" in error_msg
                 or "str" in error_msg
                 or err_type == "string_type"
                 or err_type == "list_type"  # Added list_type for robustness
+                or err_type == "dict_type"
             ):
                 return JSONResponse(
                     status_code=400,
