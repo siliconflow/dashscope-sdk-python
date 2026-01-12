@@ -691,7 +691,7 @@ def create_app() -> FastAPI:
                 status_code=400,
                 content={
                     "code": "BadRequest.EmptyModel",
-                    "message": 'Required parameter "model" missing from request.'
+                    "message": 'Required parameter "model" missing from request.',
                 },
             )
 
