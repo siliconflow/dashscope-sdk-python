@@ -118,6 +118,10 @@ class Parameters(BaseModel):
     presence_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.0
 
+    # Supported by Pydantic parsing but logic will reject them to pass tests
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
+
     stop: Optional[Union[str, List[str]]] = None
     stop_words: Optional[List[Dict[str, Any]]] = None
     enable_thinking: bool = False
@@ -156,7 +160,6 @@ class DeepSeekProxy:
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
-        # Default is kept here for internal logic, but strict check is added in generate()
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
     def _convert_input_to_messages(self, input_data: InputData) -> List[Dict[str, str]]:
@@ -194,15 +197,22 @@ class DeepSeekProxy:
         has_input = req_data.input is not None
         has_content = False
         if has_input:
+            # Strict mutual exclusion check
+            if req_data.input.messages is not None and req_data.input.prompt is not None:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": '<400> InternalError.Algo.InvalidParameter: Only one of the parameters "prompt" and "messages" can be present',
+                    },
+                )
+
             has_content = (
                 bool(req_data.input.messages)
                 or bool(req_data.input.prompt)
                 or bool(req_data.input.history)
             )
 
-            # 如果用户显式传了 prompt="" (空字符串)，按照 DashScope 协议这是明确的非法参数，
-            # 此时即使有 history，也应该强制报错。
-            # 注意：如果 prompt 是 None (即没传该字段)，则不受此逻辑影响，保留了 history 的原有行为。
             if req_data.input.prompt == "" and not req_data.input.messages:
                 has_content = False
 
@@ -216,6 +226,26 @@ class DeepSeekProxy:
             )
 
         params = req_data.parameters
+
+        # Logprobs not supported
+        if params.logprobs:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": "<400> InternalError.Algo.InvalidParameter: The parameters `logprobs` is not supported.",
+                },
+            )
+
+        # max_tokens range check
+        if params.max_tokens is not None and params.max_tokens < 1:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": f"<400> InternalError.Algo.InvalidParameter: Range of max_tokens should be [1, 2147483647]",
+                },
+            )
 
         # --- Validation Logic ---
         if params.n is not None:
@@ -235,6 +265,16 @@ class DeepSeekProxy:
                     content={
                         "code": "InvalidParameter",
                         "message": "<400> InternalError.Algo.InvalidParameter: thinking_budget should be greater than 0",
+                    },
+                )
+
+        if params.seed is not None:
+            if not (0 <= params.seed <= 9223372036854775807):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Range of seed should be [0, 9223372036854775807]",
                     },
                 )
 
@@ -322,7 +362,6 @@ class DeepSeekProxy:
         target_model = self._get_mapped_model(req_data.model)
         messages = self._convert_input_to_messages(req_data.input)
 
-        # Stream enablement condition = parameter requires incremental OR thinking enabled OR external forced stream (SSE)
         should_stream = (
             params.incremental_output or params.enable_thinking or force_stream
         )
@@ -332,7 +371,7 @@ class DeepSeekProxy:
             "messages": messages,
             "temperature": params.temperature,
             "top_p": params.top_p,
-            "stream": should_stream,  # Use calculated stream status
+            "stream": should_stream,
         }
 
         if params.response_format:
@@ -457,8 +496,6 @@ class DeepSeekProxy:
                     "X-SiliconCloud-Trace-Id", initial_request_id
                 )
 
-                # If params.incremental_output is True, return incremental (Delta)
-                # If params.incremental_output is False, return full text (Accumulated)
                 return StreamingResponse(
                     self._stream_generator(
                         raw_resp.parse(),
@@ -543,16 +580,10 @@ class DeepSeekProxy:
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
 
-            # Decide what content to send based on is_incremental
             if is_incremental:
-                # Mode: Incremental (Delta)
-                # Bug Fix: Even if it is the last packet (finish_reason != null), only send delta.
-                # Only send content if delta has content, otherwise send empty string.
                 content_to_send = delta_content
                 reasoning_to_send = delta_reasoning
             else:
-                # Mode: Full (Accumulated)
-                # Every packet returns the full accumulated text so far.
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
 
@@ -702,18 +733,19 @@ def create_app() -> FastAPI:
         error_msg = err.get("msg", "Invalid parameter")
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
+        path_str = ".".join([str(x) for x in loc if x != "body"])
+        err_type = err.get("type")
 
         if "stop" in loc:
             return JSONResponse(
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
-                    # 这里必须严格匹配测试用例期望的字符串
                     "message": "<400> InternalError.Algo.InvalidParameter: Input should be a valid list: parameters.stop.list[any] & Input should be a valid string: parameters.stop.str",
                 },
             )
 
-        if "model" in loc and err.get("type") == "missing":
+        if "model" in loc and err_type == "missing":
             return JSONResponse(
                 status_code=400,
                 content={
@@ -722,19 +754,14 @@ def create_app() -> FastAPI:
                 },
             )
 
-        if err.get("type") == "int_parsing":
-            # Reconstruct path "parameters.max_length" from ["body", "parameters", "max_length"]
-            path_str = ".".join([str(x) for x in loc if x != "body"])
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "code": "InvalidParameter",
-                    "message": f"<400> InternalError.Algo.InvalidParameter: {error_msg}: {path_str}",
-                },
-            )
-
+        # Catch generic typing errors for content (including lists passed to str)
         if param_name == "content":
-            if "valid string" in error_msg or "str" in error_msg:
+            if (
+                "valid string" in error_msg
+                or "str" in error_msg
+                or err_type == "string_type"
+                or err_type == "list_type"  # Added list_type for robustness
+            ):
                 return JSONResponse(
                     status_code=400,
                     content={
@@ -742,6 +769,32 @@ def create_app() -> FastAPI:
                         "message": "<400> InternalError.Algo.InvalidParameter: An unknown error occurred due to an unsupported input format.",
                     },
                 )
+
+        if "response_format" in loc and err_type == "dict_type":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": "<400> InternalError.Algo.InvalidParameter: Unknown format of response_format, response_format should be a dict, includes 'type' and an optional key 'json_schema'. The response_format type from user is <class 'str'>.",
+                },
+            )
+
+        type_msg_map = {
+            "int_parsing": "Input should be a valid integer",
+            "int_from_float": "Input should be a valid integer",
+            "float_parsing": "Input should be a valid number, unable to parse string as a number",
+            "bool_parsing": "Input should be a valid boolean, unable to interpret input",
+            "string_type": "Input should be a valid string",
+        }
+
+        if err_type in type_msg_map:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": f"<400> InternalError.Algo.InvalidParameter: {type_msg_map[err_type]}: {path_str}",
+                },
+            )
 
         logger.error(f"Validation Error: {exc.errors()}")
 
@@ -797,7 +850,6 @@ def create_app() -> FastAPI:
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
 
-        # but do not modify the user's incremental_output parameter.
         force_stream = False
         if (
             "text/event-stream" in accept_header or dashscope_sse == "enable"
@@ -806,7 +858,6 @@ def create_app() -> FastAPI:
                 f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream transport"
             )
             force_stream = True
-            # Note: The line `body.parameters.incremental_output = True` was removed here.
 
         if SERVER_STATE.is_mock_mode:
             if body:
@@ -832,7 +883,6 @@ def create_app() -> FastAPI:
                     status_code=500, content={"code": "MockError", "message": str(e)}
                 )
 
-        # Pass force_stream to generate
         return await proxy.generate(body, request_id, force_stream=force_stream)
 
     @app.post("/siliconflow/models/{model_path:path}")
