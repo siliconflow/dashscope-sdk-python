@@ -180,9 +180,10 @@ class DeepSeekProxy:
         req_data: GenerationRequest,
         initial_request_id: str,
         force_stream: bool = False,
+        skip_model_exist_check: bool = False,
     ):
-        if req_data.model not in MODEL_MAPPING:
-             return JSONResponse(
+        if not skip_model_exist_check and req_data.model not in MODEL_MAPPING:
+            return JSONResponse(
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
@@ -706,9 +707,9 @@ def create_app() -> FastAPI:
             )
 
         if err.get("type") == "int_parsing":
-             # Reconstruct path "parameters.max_length" from ["body", "parameters", "max_length"]
-             path_str = ".".join([str(x) for x in loc if x != 'body'])
-             return JSONResponse(
+            # Reconstruct path "parameters.max_length" from ["body", "parameters", "max_length"]
+            path_str = ".".join([str(x) for x in loc if x != "body"])
+            return JSONResponse(
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
@@ -843,7 +844,9 @@ def create_app() -> FastAPI:
             )
             force_stream = True
 
-        return await proxy.generate(body, request_id, force_stream=force_stream)
+        return await proxy.generate(
+            body, request_id, force_stream=force_stream, skip_model_exist_check=True
+        )
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
