@@ -556,6 +556,7 @@ class DeepSeekProxy:
 
         full_text = ""
         full_reasoning = ""
+        accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
         async for chunk in stream:
             if chunk.usage:
@@ -583,9 +584,42 @@ class DeepSeekProxy:
             if delta_reasoning:
                 full_reasoning += delta_reasoning
 
-            tool_calls = None
+            current_tool_calls_payload = None
+
             if delta and delta.tool_calls:
-                tool_calls = [tc.model_dump() for tc in delta.tool_calls]
+                # 只有 is_incremental=True 才直接发送 delta，否则我们发送完整列表
+                if is_incremental:
+                    current_tool_calls_payload = [
+                        tc.model_dump() for tc in delta.tool_calls
+                    ]
+
+                # 始终进行聚合，以备 incremental_output=False 使用
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in accumulated_tool_calls:
+                        accumulated_tool_calls[idx] = {
+                            "index": idx,
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name or "",
+                                "arguments": "",
+                            },
+                        }
+                    else:
+                        # 合并字段
+                        if tc.id:
+                            accumulated_tool_calls[idx]["id"] = tc.id
+                        if tc.function.name:
+                            accumulated_tool_calls[idx]["function"][
+                                "name"
+                            ] = tc.function.name
+
+                    # 拼接参数
+                    if tc.function.arguments:
+                        accumulated_tool_calls[idx]["function"][
+                            "arguments"
+                        ] += tc.function.arguments
 
             if chunk.choices and chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
@@ -593,17 +627,28 @@ class DeepSeekProxy:
             if is_incremental:
                 content_to_send = delta_content
                 reasoning_to_send = delta_reasoning
+                # 如果是增量模式，使用上面提取的 delta payload
+                final_tool_calls = current_tool_calls_payload
             else:
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
+                # 如果是非增量模式，发送当前聚合的所有工具调用的列表
+                if accumulated_tool_calls:
+                    # 将字典转回列表并按 index 排序
+                    final_tool_calls = sorted(
+                        accumulated_tool_calls.values(), key=lambda x: x["index"]
+                    )
+                else:
+                    final_tool_calls = None
 
             message_body = {
                 "role": "assistant",
                 "content": content_to_send,
                 "reasoning_content": reasoning_to_send,
             }
-            if tool_calls:
-                message_body["tool_calls"] = tool_calls
+
+            if final_tool_calls:
+                message_body["tool_calls"] = final_tool_calls
 
             response_body = {
                 "output": {
