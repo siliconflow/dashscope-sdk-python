@@ -122,7 +122,8 @@ class Parameters(BaseModel):
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
 
-    stop: Optional[Union[str, List[str]]] = None
+    stop: Optional[Union[str, List[Union[str, int]]]] = None
+
     stop_words: Optional[List[Dict[str, Any]]] = None
     enable_thinking: bool = False
     thinking_budget: Optional[int] = None
