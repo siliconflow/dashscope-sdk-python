@@ -697,6 +697,16 @@ def create_app() -> FastAPI:
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
 
+        if "stop" in loc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    # 这里必须严格匹配测试用例期望的字符串
+                    "message": "<400> InternalError.Algo.InvalidParameter: Input should be a valid list: parameters.stop.list[any] & Input should be a valid string: parameters.stop.str",
+                },
+            )
+
         if "model" in loc and err.get("type") == "missing":
             return JSONResponse(
                 status_code=400,
