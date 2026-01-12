@@ -156,6 +156,7 @@ class DeepSeekProxy:
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
+        # Default is kept here for internal logic, but strict check is added in generate()
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
     def _convert_input_to_messages(self, input_data: InputData) -> List[Dict[str, str]]:
@@ -180,6 +181,15 @@ class DeepSeekProxy:
         initial_request_id: str,
         force_stream: bool = False,
     ):
+        if req_data.model not in MODEL_MAPPING:
+             return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": "Model not exist.",
+                },
+            )
+
         has_input = req_data.input is not None
         has_content = False
         if has_input:
@@ -692,6 +702,17 @@ def create_app() -> FastAPI:
                 content={
                     "code": "BadRequest.EmptyModel",
                     "message": 'Required parameter "model" missing from request.',
+                },
+            )
+
+        if err.get("type") == "int_parsing":
+             # Reconstruct path "parameters.max_length" from ["body", "parameters", "max_length"]
+             path_str = ".".join([str(x) for x in loc if x != 'body'])
+             return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": f"<400> InternalError.Algo.InvalidParameter: {error_msg}: {path_str}",
                 },
             )
 
