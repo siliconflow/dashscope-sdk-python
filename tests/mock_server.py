@@ -180,7 +180,6 @@ class DeepSeekProxy:
         initial_request_id: str,
         force_stream: bool = False,
     ):
-        # --- Input Content Validation (Case: testNonInputByCode) ---
         has_input = req_data.input is not None
         has_content = False
         if has_input:
@@ -687,7 +686,6 @@ def create_app() -> FastAPI:
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
 
-        # --- Handle Missing Model (Case: testEmptyMsgByCode) ---
         if "model" in loc and err.get("type") == "missing":
             return JSONResponse(
                 status_code=400,
