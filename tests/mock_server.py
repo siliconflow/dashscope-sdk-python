@@ -398,7 +398,13 @@ class DeepSeekProxy:
                         "message": "<400> InternalError.Algo.InvalidParameter: Repetition_penalty should be greater than 0.0",
                     },
                 )
-            extra_body["repetition_penalty"] = params.repetition_penalty
+            # Limit repetition_penalty to (0, 2] range, clamp values that exceed 2
+            clamped_penalty = min(params.repetition_penalty, 2.0)
+            if clamped_penalty != params.repetition_penalty:
+                logger.warning(
+                    f"Repetition penalty {params.repetition_penalty} exceeds maximum allowed value 2.0, clamping to 2.0"
+                )
+            extra_body["repetition_penalty"] = clamped_penalty
 
         if params.top_k is not None:
             if params.top_k < 0:
