@@ -200,6 +200,12 @@ class DeepSeekProxy:
                 or bool(req_data.input.history)
             )
 
+            # 如果用户显式传了 prompt="" (空字符串)，按照 DashScope 协议这是明确的非法参数，
+            # 此时即使有 history，也应该强制报错。
+            # 注意：如果 prompt 是 None (即没传该字段)，则不受此逻辑影响，保留了 history 的原有行为。
+            if req_data.input.prompt == "" and not req_data.input.messages:
+                has_content = False
+
         if not has_input or not has_content:
             return JSONResponse(
                 status_code=400,
