@@ -591,17 +591,14 @@ class DeepSeekProxy:
 
         # --- Stop Logic Buffer State ---
         content_buffer = ""
-        # Determine the maximum length of any stop sequence to know how much safe buffer to keep
         max_stop_len = max([len(s) for s in stop_sequences]) if stop_sequences else 0
         stop_triggered = False
 
         async for chunk in stream:
             if stop_triggered:
-                continue  # Consume stream but do not yield
+                continue
 
             if chunk.usage:
-                # Note: Usage might be slightly higher than what user sees if we cut it off,
-                # but we pass upstream usage for accuracy of billing/computation.
                 accumulated_usage["total_tokens"] = chunk.usage.total_tokens
                 accumulated_usage["input_tokens"] = chunk.usage.prompt_tokens
                 accumulated_usage["output_tokens"] = chunk.usage.completion_tokens
@@ -617,13 +614,13 @@ class DeepSeekProxy:
 
             delta = chunk.choices[0].delta if chunk.choices else None
 
-            # Reasoning Content
+            # --- 1. Reasoning Content Handling ---
             delta_reasoning = (
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
             if delta_reasoning:
                 full_reasoning += delta_reasoning
-                # Reasoning is yielded immediately regardless of buffering state of content
+                # 修复逻辑：无论是否 incremental，收到推理内容时都应输出
                 if is_incremental:
                     yield self._build_stream_response(
                         content="",
@@ -633,41 +630,39 @@ class DeepSeekProxy:
                         usage=accumulated_usage,
                         request_id=request_id,
                     )
+                else:
+                    # 非增量模式下，输出当前累积的全量推理内容 + 当前累积的全量文本
+                    yield self._build_stream_response(
+                        content=full_text,
+                        reasoning_content=full_reasoning,
+                        tool_calls=None,
+                        finish_reason="null",
+                        usage=accumulated_usage,
+                        request_id=request_id,
+                    )
 
-            # Content
+            # --- 2. Content Handling ---
             delta_content = delta.content if delta and delta.content else ""
-
             content_to_yield = ""
 
             if delta_content:
                 if not stop_sequences:
-                    # No stop logic, pass through
                     content_to_yield = delta_content
                     full_text += delta_content
                 else:
-                    # Buffer logic
                     content_buffer += delta_content
-
-                    # Check if buffer contains any stop sequence
                     earliest_idx, _ = self._find_earliest_stop(
                         content_buffer, stop_sequences
                     )
 
                     if earliest_idx != -1:
-                        # Stop found
                         stop_triggered = True
                         finish_reason = "stop"
-
-                        # Yield everything up to the stop sequence
                         final_chunk = content_buffer[:earliest_idx]
                         content_to_yield = final_chunk
                         full_text += final_chunk
-                        content_buffer = ""  # Clear buffer
-                        # We break the loop later after sending this final chunk
+                        content_buffer = ""
                     else:
-                        # No stop found yet.
-                        # We can safely yield the part of the buffer that is "safe"
-                        # Simplest heuristic: Keep the last N characters where N is max_stop_len
                         if len(content_buffer) > max_stop_len:
                             safe_chars = len(content_buffer) - max_stop_len
                             chunk_safe = content_buffer[:safe_chars]
@@ -675,7 +670,7 @@ class DeepSeekProxy:
                             full_text += chunk_safe
                             content_buffer = content_buffer[safe_chars:]
 
-            # Tool calls logic
+            # --- 3. Tool Calls Handling ---
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
@@ -715,20 +710,35 @@ class DeepSeekProxy:
             if upstream_finish != "null":
                 finish_reason = upstream_finish
 
-            # Yield Content if we have something ready to go
-            if is_incremental:
-                if (
-                    content_to_yield
-                    or current_tool_calls_payload
-                    or (stop_triggered and finish_reason == "stop")
-                ):
+            # --- 4. Yield Content Logic (Fixed) ---
+
+            # 判断是否有实质内容需要推送
+            has_content_update = (
+                content_to_yield
+                or current_tool_calls_payload
+                or (stop_triggered and finish_reason == "stop")
+            )
+
+            if has_content_update:
+                if is_incremental:
+                    # 增量模式：只推 delta
                     yield self._build_stream_response(
                         content=content_to_yield,
-                        reasoning_content="",  # Already sent above
+                        reasoning_content="",  # 推理已在上方单独处理
                         tool_calls=current_tool_calls_payload,
-                        finish_reason=(
-                            finish_reason if stop_triggered else "null"
-                        ),  # Don't send upstream finish yet unless stopped
+                        finish_reason=(finish_reason if stop_triggered else "null"),
+                        usage=accumulated_usage,
+                        request_id=request_id,
+                    )
+                else:
+                    # 非增量模式（全量模式）：推送 full_text
+                    # 注意：非增量模式下，Tool Calls 通常建议在结束时统一发送，或者累积发送
+                    # 这里为了保持简洁，暂不实时推送未完成的 Tool Calls 结构，除非你需要
+                    yield self._build_stream_response(
+                        content=full_text,
+                        reasoning_content=full_reasoning,
+                        tool_calls=None,  # 全量模式通常不流式传输部分工具调用，只传输文本
+                        finish_reason=(finish_reason if stop_triggered else "null"),
                         usage=accumulated_usage,
                         request_id=request_id,
                     )
@@ -736,11 +746,12 @@ class DeepSeekProxy:
             if stop_triggered:
                 break
 
-        # End of Stream
+        # --- End of Stream Handling ---
 
-        # If we have leftover buffer and weren't stopped, flush it now
+        # Flush leftover buffer if not stopped
         if not stop_triggered and content_buffer and stop_sequences:
             full_text += content_buffer
+            # 如果还有缓冲区剩余，根据模式推送
             if is_incremental:
                 yield self._build_stream_response(
                     content=content_buffer,
@@ -750,10 +761,19 @@ class DeepSeekProxy:
                     usage=accumulated_usage,
                     request_id=request_id,
                 )
+            else:
+                yield self._build_stream_response(
+                    content=full_text,
+                    reasoning_content=full_reasoning,
+                    tool_calls=None,
+                    finish_reason="null",
+                    usage=accumulated_usage,
+                    request_id=request_id,
+                )
 
+        # Final Finish Handling
         if not is_incremental:
-            # For non-incremental (but stream=True upstream), we yield the whole thing at the end
-            # Applying stop logic to the full text collected
+            # 非增量模式的最后一包，包含 finish_reason 和完整的 Tool Calls
             if stop_sequences:
                 earliest_idx, _ = self._find_earliest_stop(full_text, stop_sequences)
                 if earliest_idx != -1:
@@ -775,7 +795,7 @@ class DeepSeekProxy:
                 request_id=request_id,
             )
         else:
-            # Send final finish reason for incremental mode if not already sent via stop trigger
+            # 增量模式，如果没有通过 stop 触发结束，需要发一个空的结束包
             if not stop_triggered and finish_reason != "null":
                 yield self._build_stream_response(
                     content="",
