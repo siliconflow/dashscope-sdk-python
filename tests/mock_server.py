@@ -93,6 +93,7 @@ class Message(BaseModel):
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
+    partial: Optional[bool] = None
 
     model_config = ConfigDict(extra="allow")
 
