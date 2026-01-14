@@ -205,7 +205,7 @@ class DeepSeekProxy:
         force_stream: bool = False,
         skip_model_exist_check: bool = False,
     ):
-        # 1. 模型存在性检查
+        # Model existence check
         if not skip_model_exist_check and req_data.model not in MODEL_MAPPING:
             return JSONResponse(
                 status_code=400,
@@ -215,7 +215,7 @@ class DeepSeekProxy:
                 },
             )
 
-        # 2. Input 内容检查
+        # Input content validation
         has_input = req_data.input is not None
         has_content = False
         if has_input:
@@ -251,7 +251,7 @@ class DeepSeekProxy:
 
         params = req_data.parameters
 
-        # 3. Logprobs 检查
+        # Logprobs check
         if params.logprobs:
             return JSONResponse(
                 status_code=400,
@@ -261,7 +261,7 @@ class DeepSeekProxy:
                 },
             )
 
-        # 4. Max Tokens 检查
+        # Max Tokens check
         if params.max_tokens is not None and params.max_tokens < 1:
             return JSONResponse(
                 status_code=400,
@@ -271,7 +271,7 @@ class DeepSeekProxy:
                 },
             )
 
-        # 5. N (Completions) 检查
+        # N (Completions) check
         if params.n is not None:
             if not (1 <= params.n <= 4):
                 return JSONResponse(
@@ -282,7 +282,7 @@ class DeepSeekProxy:
                     },
                 )
 
-        # 6. Thinking Budget 检查
+        # Thinking Budget check
         if params.thinking_budget is not None:
             if params.thinking_budget <= 0:
                 return JSONResponse(
@@ -293,7 +293,7 @@ class DeepSeekProxy:
                     },
                 )
 
-        # 7. Seed 检查
+        # Seed check
         if params.seed is not None:
             if not (0 <= params.seed <= 9223372036854775807):
                 return JSONResponse(
@@ -304,7 +304,7 @@ class DeepSeekProxy:
                     },
                 )
 
-        # 8. Response Format 检查
+        # Response Format check
         if params.response_format:
             rf_type = params.response_format.get("type")
             if rf_type and rf_type not in ["json_object", "text"]:
@@ -325,7 +325,7 @@ class DeepSeekProxy:
                     },
                 )
 
-        # 9. Tool Calls 链条逻辑检查
+        # Tool Calls chain logic validation
         if req_data.input.messages:
             msgs = req_data.input.messages
             for idx, msg in enumerate(msgs):
@@ -386,7 +386,7 @@ class DeepSeekProxy:
                 },
             )
 
-        # 10. Stop 参数提取 (Proxy侧处理，不再透传给上游)
+        # Stop parameter extraction
         proxy_stop_list: List[str] = []
         if params.stop:
             if isinstance(params.stop, str):
@@ -401,7 +401,7 @@ class DeepSeekProxy:
                 if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
                     proxy_stop_list.append(sw["stop_str"])
 
-        # 去重
+        # Deduplicate
         proxy_stop_list = list(set(proxy_stop_list))
 
         # --- Request Parameters Assembly ---
@@ -418,7 +418,7 @@ class DeepSeekProxy:
             "temperature": params.temperature,
             "top_p": params.top_p,
             "stream": should_stream,
-            # 注意: "stop" 在这里被有意省略，完全由Proxy侧接管
+            # Note: "stop" is intentionally omitted here, handled by proxy
         }
 
         if params.response_format:
@@ -613,7 +613,7 @@ class DeepSeekProxy:
 
             delta = chunk.choices[0].delta if chunk.choices else None
 
-            # 1. Reasoning Content (Pass-through directly, no stop logic)
+            # Reasoning Content
             delta_reasoning = (
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
@@ -630,7 +630,7 @@ class DeepSeekProxy:
                         request_id=request_id,
                     )
 
-            # 2. Content (Buffered and checked for stop)
+            # Content
             delta_content = delta.content if delta and delta.content else ""
 
             content_to_yield = ""
@@ -650,7 +650,7 @@ class DeepSeekProxy:
                     )
 
                     if earliest_idx != -1:
-                        # Stop found!
+                        # Stop found
                         stop_triggered = True
                         finish_reason = "stop"
 
@@ -663,7 +663,6 @@ class DeepSeekProxy:
                     else:
                         # No stop found yet.
                         # We can safely yield the part of the buffer that is "safe"
-                        # i.e., characters that cannot possibly be the start of a stop sequence being formed.
                         # Simplest heuristic: Keep the last N characters where N is max_stop_len
                         if len(content_buffer) > max_stop_len:
                             safe_chars = len(content_buffer) - max_stop_len
@@ -672,7 +671,7 @@ class DeepSeekProxy:
                             full_text += chunk_safe
                             content_buffer = content_buffer[safe_chars:]
 
-            # Tool calls logic (accumulation)
+            # Tool calls logic
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
@@ -937,10 +936,10 @@ def create_app() -> FastAPI:
     )
 
     @app.exception_handler(RequestValidationError)
-    @app.exception_handler(ValidationError)  # <--- 新增这行，捕获手动解析时的错误
+    @app.exception_handler(ValidationError)  # Catch errors during manual parsing
     async def validation_exception_handler(request, exc):
         try:
-            # 兼容两种异常获取 errors 的方式
+            # Compatible with two ways of retrieving errors
             errors = exc.errors() if hasattr(exc, "errors") else []
         except Exception:
             errors = [{"msg": str(exc), "loc": [], "type": "unknown"}]
@@ -962,7 +961,7 @@ def create_app() -> FastAPI:
         err_type = err.get("type")
         input_value = err.get("input")
 
-        # --- 以下保持原有的逻辑不变 ---
+        # Keep original logic below
 
         if err_type == "int_parsing":
             if isinstance(input_value, str):
@@ -1059,7 +1058,7 @@ def create_app() -> FastAPI:
                 },
             )
 
-        # 兜底日志
+        # Fallback logging
         logger.error(f"Validation Error: {errors}")
 
         return JSONResponse(
