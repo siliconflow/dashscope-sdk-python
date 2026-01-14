@@ -463,8 +463,8 @@ class DeepSeekProxy:
             else:
                 extra_body["top_k"] = params.top_k
 
-        if params.enable_thinking:
-            extra_body["enable_thinking"] = True
+        extra_body["enable_thinking"] = params.enable_thinking
+
         if params.enable_thinking and params.thinking_budget is not None:
             extra_body["thinking_budget"] = params.thinking_budget
 
