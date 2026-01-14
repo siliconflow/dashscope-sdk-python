@@ -118,7 +118,6 @@ class Parameters(BaseModel):
     presence_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.0
 
-    # Supported by Pydantic parsing but logic will reject them to pass tests
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
 
@@ -198,7 +197,6 @@ class DeepSeekProxy:
         has_input = req_data.input is not None
         has_content = False
         if has_input:
-            # Strict mutual exclusion check
             if (
                 req_data.input.messages is not None
                 and req_data.input.prompt is not None
@@ -231,7 +229,6 @@ class DeepSeekProxy:
 
         params = req_data.parameters
 
-        # Logprobs not supported
         if params.logprobs:
             return JSONResponse(
                 status_code=400,
@@ -241,7 +238,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # max_tokens range check
         if params.max_tokens is not None and params.max_tokens < 1:
             return JSONResponse(
                 status_code=400,
@@ -398,7 +394,6 @@ class DeepSeekProxy:
                         "message": "<400> InternalError.Algo.InvalidParameter: Repetition_penalty should be greater than 0.0",
                     },
                 )
-            # Limit repetition_penalty to (0, 2] range, clamp values that exceed 2
             clamped_penalty = min(params.repetition_penalty, 2.0)
             if clamped_penalty != params.repetition_penalty:
                 logger.warning(
@@ -590,13 +585,11 @@ class DeepSeekProxy:
             current_tool_calls_payload = None
 
             if delta and delta.tool_calls:
-                # 只有 is_incremental=True 才直接发送 delta，否则我们发送完整列表
                 if is_incremental:
                     current_tool_calls_payload = [
                         tc.model_dump() for tc in delta.tool_calls
                     ]
 
-                # 始终进行聚合，以备 incremental_output=False 使用
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in accumulated_tool_calls:
@@ -610,7 +603,6 @@ class DeepSeekProxy:
                             },
                         }
                     else:
-                        # 合并字段
                         if tc.id:
                             accumulated_tool_calls[idx]["id"] = tc.id
                         if tc.function.name:
@@ -618,7 +610,6 @@ class DeepSeekProxy:
                                 "name"
                             ] = tc.function.name
 
-                    # 拼接参数
                     if tc.function.arguments:
                         accumulated_tool_calls[idx]["function"][
                             "arguments"
@@ -630,14 +621,11 @@ class DeepSeekProxy:
             if is_incremental:
                 content_to_send = delta_content
                 reasoning_to_send = delta_reasoning
-                # 如果是增量模式，使用上面提取的 delta payload
                 final_tool_calls = current_tool_calls_payload
             else:
                 content_to_send = full_text
                 reasoning_to_send = full_reasoning
-                # 如果是非增量模式，发送当前聚合的所有工具调用的列表
                 if accumulated_tool_calls:
-                    # 将字典转回列表并按 index 排序
                     final_tool_calls = sorted(
                         accumulated_tool_calls.values(), key=lambda x: x["index"]
                     )
@@ -794,6 +782,45 @@ def create_app() -> FastAPI:
         path_str = ".".join([str(x) for x in loc if x != "body"])
         err_type = err.get("type")
 
+        input_value = err.get("input")
+
+        if err_type == "int_parsing":
+            if isinstance(input_value, str):
+                if param_name in ["max_tokens", "max_length"]:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": f"<400> InternalError.Algo.InvalidParameter: Input should be a valid integer, unable to parse string as an integer: {path_str}",
+                        },
+                    )
+                else:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": f"<400> InternalError.Algo.InvalidParameter: Input should be a valid integer: {path_str}",
+                        },
+                    )
+
+        if err_type == "int_from_float":
+            if param_name in ["max_tokens", "max_length"]:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": f"<400> InternalError.Algo.InvalidParameter: Input should be a valid integer, got a number with a fractional part: {path_str}",
+                    },
+                )
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": f"<400> InternalError.Algo.InvalidParameter: Input should be a valid integer: {path_str}",
+                    },
+                )
+
         if "stop" in loc:
             return JSONResponse(
                 status_code=400,
@@ -812,13 +839,12 @@ def create_app() -> FastAPI:
                 },
             )
 
-        # Catch generic typing errors for content (including lists passed to str)
         if param_name == "content" or (len(loc) > 1 and loc[-2] == "content"):
             if (
                 "valid string" in error_msg
                 or "str" in error_msg
                 or err_type == "string_type"
-                or err_type == "list_type"  # Added list_type for robustness
+                or err_type == "list_type"
                 or err_type == "dict_type"
             ):
                 return JSONResponse(
@@ -839,8 +865,6 @@ def create_app() -> FastAPI:
             )
 
         type_msg_map = {
-            "int_parsing": "Input should be a valid integer",
-            "int_from_float": "Input should be a valid integer",
             "float_parsing": "Input should be a valid number, unable to parse string as a number",
             "bool_parsing": "Input should be a valid boolean, unable to interpret input",
             "string_type": "Input should be a valid string",
