@@ -20,10 +20,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # Now copy the rest of the app
-COPY . .
+COPY uv.lock .
+COPY pyproject.toml .
+COPY tests/mock_server.py ./main.py
 
 # Make sure the venv's executables are on PATH
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
-CMD ["uv", "run", "--frozen", "python", "tests/mock_server.py"]
+CMD ["uv", "run", "--frozen", "python", "main.py"]
