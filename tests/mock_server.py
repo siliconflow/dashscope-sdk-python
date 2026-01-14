@@ -614,13 +614,13 @@ class DeepSeekProxy:
 
             delta = chunk.choices[0].delta if chunk.choices else None
 
-            # --- 1. Reasoning Content Handling ---
+            # --- Reasoning Content Handling ---
             delta_reasoning = (
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
             if delta_reasoning:
                 full_reasoning += delta_reasoning
-                # 修复逻辑：无论是否 incremental，收到推理内容时都应输出
+                # Output reasoning content regardless of incremental mode
                 if is_incremental:
                     yield self._build_stream_response(
                         content="",
@@ -631,7 +631,7 @@ class DeepSeekProxy:
                         request_id=request_id,
                     )
                 else:
-                    # 非增量模式下，输出当前累积的全量推理内容 + 当前累积的全量文本
+                    # In non-incremental mode, output accumulated reasoning and text
                     yield self._build_stream_response(
                         content=full_text,
                         reasoning_content=full_reasoning,
@@ -641,7 +641,7 @@ class DeepSeekProxy:
                         request_id=request_id,
                     )
 
-            # --- 2. Content Handling ---
+            # --- Text Content Handling ---
             delta_content = delta.content if delta and delta.content else ""
             content_to_yield = ""
 
@@ -670,7 +670,7 @@ class DeepSeekProxy:
                             full_text += chunk_safe
                             content_buffer = content_buffer[safe_chars:]
 
-            # --- 3. Tool Calls Handling ---
+            # --- Tool Calls Handling ---
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
@@ -710,9 +710,9 @@ class DeepSeekProxy:
             if upstream_finish != "null":
                 finish_reason = upstream_finish
 
-            # --- 4. Yield Content Logic (Fixed) ---
+            # --- Yield Content Logic ---
 
-            # 判断是否有实质内容需要推送
+            # Check if there is actual content to push
             has_content_update = (
                 content_to_yield
                 or current_tool_calls_payload
@@ -721,23 +721,22 @@ class DeepSeekProxy:
 
             if has_content_update:
                 if is_incremental:
-                    # 增量模式：只推 delta
+                    # Incremental mode: push only delta
                     yield self._build_stream_response(
                         content=content_to_yield,
-                        reasoning_content="",  # 推理已在上方单独处理
+                        reasoning_content="",  # Reasoning handled above
                         tool_calls=current_tool_calls_payload,
                         finish_reason=(finish_reason if stop_triggered else "null"),
                         usage=accumulated_usage,
                         request_id=request_id,
                     )
                 else:
-                    # 非增量模式（全量模式）：推送 full_text
-                    # 注意：非增量模式下，Tool Calls 通常建议在结束时统一发送，或者累积发送
-                    # 这里为了保持简洁，暂不实时推送未完成的 Tool Calls 结构，除非你需要
+                    # Non-incremental mode: push full text
+                    # Note: Full tool calls are usually sent at the end in non-incremental mode
                     yield self._build_stream_response(
                         content=full_text,
                         reasoning_content=full_reasoning,
-                        tool_calls=None,  # 全量模式通常不流式传输部分工具调用，只传输文本
+                        tool_calls=None,
                         finish_reason=(finish_reason if stop_triggered else "null"),
                         usage=accumulated_usage,
                         request_id=request_id,
@@ -751,7 +750,7 @@ class DeepSeekProxy:
         # Flush leftover buffer if not stopped
         if not stop_triggered and content_buffer and stop_sequences:
             full_text += content_buffer
-            # 如果还有缓冲区剩余，根据模式推送
+            # Flush remaining buffer based on mode
             if is_incremental:
                 yield self._build_stream_response(
                     content=content_buffer,
@@ -773,7 +772,7 @@ class DeepSeekProxy:
 
         # Final Finish Handling
         if not is_incremental:
-            # 非增量模式的最后一包，包含 finish_reason 和完整的 Tool Calls
+            # Final packet for non-incremental mode: includes finish_reason and complete Tool Calls
             if stop_sequences:
                 earliest_idx, _ = self._find_earliest_stop(full_text, stop_sequences)
                 if earliest_idx != -1:
@@ -795,7 +794,7 @@ class DeepSeekProxy:
                 request_id=request_id,
             )
         else:
-            # 增量模式，如果没有通过 stop 触发结束，需要发一个空的结束包
+            # Incremental mode: send empty end packet if not triggered by stop
             if not stop_triggered and finish_reason != "null":
                 yield self._build_stream_response(
                     content="",
