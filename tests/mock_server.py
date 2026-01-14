@@ -5,7 +5,7 @@ import uuid
 import logging
 import threading
 import multiprocessing
-from typing import List, Optional, Dict, Any, Union, AsyncGenerator
+from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
 
 import httpx
@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, AliasChoices, ConfigDict
+from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
 # --- Logging Configuration ---
@@ -179,6 +179,25 @@ class DeepSeekProxy:
             messages.append({"role": "user", "content": input_data.prompt})
         return messages
 
+    def _find_earliest_stop(
+        self, text: str, stop_sequences: List[str]
+    ) -> Tuple[int, Optional[str]]:
+        """
+        Helper to find the earliest occurrence of any stop sequence in text.
+        Returns (index, stop_sequence_found). If not found, index is -1.
+        """
+        min_index = -1
+        found_stop = None
+        for stop_seq in stop_sequences:
+            if not stop_seq:
+                continue
+            idx = text.find(stop_seq)
+            if idx != -1:
+                if min_index == -1 or idx < min_index:
+                    min_index = idx
+                    found_stop = stop_seq
+        return min_index, found_stop
+
     async def generate(
         self,
         req_data: GenerationRequest,
@@ -186,6 +205,7 @@ class DeepSeekProxy:
         force_stream: bool = False,
         skip_model_exist_check: bool = False,
     ):
+        # 1. 模型存在性检查
         if not skip_model_exist_check and req_data.model not in MODEL_MAPPING:
             return JSONResponse(
                 status_code=400,
@@ -195,6 +215,7 @@ class DeepSeekProxy:
                 },
             )
 
+        # 2. Input 内容检查
         has_input = req_data.input is not None
         has_content = False
         if has_input:
@@ -230,6 +251,7 @@ class DeepSeekProxy:
 
         params = req_data.parameters
 
+        # 3. Logprobs 检查
         if params.logprobs:
             return JSONResponse(
                 status_code=400,
@@ -239,6 +261,7 @@ class DeepSeekProxy:
                 },
             )
 
+        # 4. Max Tokens 检查
         if params.max_tokens is not None and params.max_tokens < 1:
             return JSONResponse(
                 status_code=400,
@@ -248,7 +271,7 @@ class DeepSeekProxy:
                 },
             )
 
-        # --- Validation Logic ---
+        # 5. N (Completions) 检查
         if params.n is not None:
             if not (1 <= params.n <= 4):
                 return JSONResponse(
@@ -259,6 +282,7 @@ class DeepSeekProxy:
                     },
                 )
 
+        # 6. Thinking Budget 检查
         if params.thinking_budget is not None:
             if params.thinking_budget <= 0:
                 return JSONResponse(
@@ -269,6 +293,7 @@ class DeepSeekProxy:
                     },
                 )
 
+        # 7. Seed 检查
         if params.seed is not None:
             if not (0 <= params.seed <= 9223372036854775807):
                 return JSONResponse(
@@ -279,6 +304,7 @@ class DeepSeekProxy:
                     },
                 )
 
+        # 8. Response Format 检查
         if params.response_format:
             rf_type = params.response_format.get("type")
             if rf_type and rf_type not in ["json_object", "text"]:
@@ -299,6 +325,7 @@ class DeepSeekProxy:
                     },
                 )
 
+        # 9. Tool Calls 链条逻辑检查
         if req_data.input.messages:
             msgs = req_data.input.messages
             for idx, msg in enumerate(msgs):
@@ -359,7 +386,25 @@ class DeepSeekProxy:
                 },
             )
 
-        # --- Request Preparation ---
+        # 10. Stop 参数提取 (Proxy侧处理，不再透传给上游)
+        proxy_stop_list: List[str] = []
+        if params.stop:
+            if isinstance(params.stop, str):
+                proxy_stop_list.append(params.stop)
+            elif isinstance(params.stop, list):
+                for s in params.stop:
+                    if isinstance(s, str):
+                        proxy_stop_list.append(s)
+
+        if params.stop_words:
+            for sw in params.stop_words:
+                if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
+                    proxy_stop_list.append(sw["stop_str"])
+
+        # 去重
+        proxy_stop_list = list(set(proxy_stop_list))
+
+        # --- Request Parameters Assembly ---
         target_model = self._get_mapped_model(req_data.model)
         messages = self._convert_input_to_messages(req_data.input)
 
@@ -373,6 +418,7 @@ class DeepSeekProxy:
             "temperature": params.temperature,
             "top_p": params.top_p,
             "stream": should_stream,
+            # 注意: "stop" 在这里被有意省略，完全由Proxy侧接管
         }
 
         if params.response_format:
@@ -380,12 +426,10 @@ class DeepSeekProxy:
 
         if params.frequency_penalty is not None:
             openai_params["frequency_penalty"] = params.frequency_penalty
-
         if params.presence_penalty is not None:
             openai_params["presence_penalty"] = params.presence_penalty
 
         extra_body = {}
-
         if params.repetition_penalty is not None:
             if params.repetition_penalty <= 0:
                 return JSONResponse(
@@ -421,7 +465,6 @@ class DeepSeekProxy:
 
         if params.enable_thinking:
             extra_body["enable_thinking"] = True
-
         if params.enable_thinking and params.thinking_budget is not None:
             extra_body["thinking_budget"] = params.thinking_budget
 
@@ -443,34 +486,17 @@ class DeepSeekProxy:
 
         if params.max_tokens is not None:
             openai_params["max_tokens"] = params.max_tokens
-            logger.debug(
-                f"[Request] Truncation enabled: max_tokens={params.max_tokens}"
-            )
-        else:
-            logger.debug(
-                "[Request] No max_tokens found in parameters, model will generate full response"
-            )
 
         if params.seed:
             openai_params["seed"] = params.seed
 
-        if params.stop:
-            openai_params["stop"] = params.stop
-        elif params.stop_words:
-            stop_list = []
-            for sw in params.stop_words:
-                if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
-                    stop_list.append(sw["stop_str"])
+        # --- Debug Logging ---
+        logger.debug(f"[Stop Sequences] Proxy handling stop for: {proxy_stop_list}")
 
-            if stop_list:
-                openai_params["stop"] = stop_list
-
-        # --- Debug Logging (CURL generation) ---
         curl_headers = [
             '-H "Authorization: Bearer ${SILICONFLOW_API_KEY}"',
             "-H 'Content-Type: application/json'",
         ]
-
         skip_keys = {"authorization", "content-type", "content-length", "host"}
         for k, v in self.client.default_headers.items():
             if k.lower() not in skip_keys and not str(v).startswith("<openai."):
@@ -492,7 +518,6 @@ class DeepSeekProxy:
             + " \\\n  ".join(curl_headers)
             + f" \\\n  -d '{json.dumps(log_payload, ensure_ascii=False)}'"
         )
-
         logger.debug(f"[Curl Command]\n{curl_cmd}")
 
         # --- Execution ---
@@ -510,6 +535,7 @@ class DeepSeekProxy:
                         raw_resp.parse(),
                         trace_id,
                         is_incremental=params.incremental_output,
+                        stop_sequences=proxy_stop_list,
                     ),
                     media_type="text/event-stream",
                     headers={"X-SiliconCloud-Trace-Id": trace_id},
@@ -521,7 +547,9 @@ class DeepSeekProxy:
                 trace_id = raw_resp.headers.get(
                     "X-SiliconCloud-Trace-Id", initial_request_id
                 )
-                return self._format_unary_response(raw_resp.parse(), trace_id)
+                return self._format_unary_response(
+                    raw_resp.parse(), trace_id, stop_sequences=proxy_stop_list
+                )
 
         except APIError as e:
             logger.error(
@@ -543,7 +571,7 @@ class DeepSeekProxy:
             )
 
     async def _stream_generator(
-        self, stream, request_id: str, is_incremental: bool
+        self, stream, request_id: str, is_incremental: bool, stop_sequences: List[str]
     ) -> AsyncGenerator[str, None]:
         accumulated_usage = {
             "total_tokens": 0,
@@ -557,8 +585,19 @@ class DeepSeekProxy:
         full_reasoning = ""
         accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
+        # --- Stop Logic Buffer State ---
+        content_buffer = ""
+        # Determine the maximum length of any stop sequence to know how much safe buffer to keep
+        max_stop_len = max([len(s) for s in stop_sequences]) if stop_sequences else 0
+        stop_triggered = False
+
         async for chunk in stream:
+            if stop_triggered:
+                continue  # Consume stream but do not yield
+
             if chunk.usage:
+                # Note: Usage might be slightly higher than what user sees if we cut it off,
+                # but we pass upstream usage for accuracy of billing/computation.
                 accumulated_usage["total_tokens"] = chunk.usage.total_tokens
                 accumulated_usage["input_tokens"] = chunk.usage.prompt_tokens
                 accumulated_usage["output_tokens"] = chunk.usage.completion_tokens
@@ -573,24 +612,73 @@ class DeepSeekProxy:
                     )
 
             delta = chunk.choices[0].delta if chunk.choices else None
-            delta_content = delta.content if delta and delta.content else ""
+
+            # 1. Reasoning Content (Pass-through directly, no stop logic)
             delta_reasoning = (
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
-
-            if delta_content:
-                full_text += delta_content
             if delta_reasoning:
                 full_reasoning += delta_reasoning
+                # Reasoning is yielded immediately regardless of buffering state of content
+                if is_incremental:
+                    yield self._build_stream_response(
+                        content="",
+                        reasoning_content=delta_reasoning,
+                        tool_calls=None,
+                        finish_reason="null",
+                        usage=accumulated_usage,
+                        request_id=request_id,
+                    )
 
+            # 2. Content (Buffered and checked for stop)
+            delta_content = delta.content if delta and delta.content else ""
+
+            content_to_yield = ""
+
+            if delta_content:
+                if not stop_sequences:
+                    # No stop logic, pass through
+                    content_to_yield = delta_content
+                    full_text += delta_content
+                else:
+                    # Buffer logic
+                    content_buffer += delta_content
+
+                    # Check if buffer contains any stop sequence
+                    earliest_idx, _ = self._find_earliest_stop(
+                        content_buffer, stop_sequences
+                    )
+
+                    if earliest_idx != -1:
+                        # Stop found!
+                        stop_triggered = True
+                        finish_reason = "stop"
+
+                        # Yield everything up to the stop sequence
+                        final_chunk = content_buffer[:earliest_idx]
+                        content_to_yield = final_chunk
+                        full_text += final_chunk
+                        content_buffer = ""  # Clear buffer
+                        # We break the loop later after sending this final chunk
+                    else:
+                        # No stop found yet.
+                        # We can safely yield the part of the buffer that is "safe"
+                        # i.e., characters that cannot possibly be the start of a stop sequence being formed.
+                        # Simplest heuristic: Keep the last N characters where N is max_stop_len
+                        if len(content_buffer) > max_stop_len:
+                            safe_chars = len(content_buffer) - max_stop_len
+                            chunk_safe = content_buffer[:safe_chars]
+                            content_to_yield = chunk_safe
+                            full_text += chunk_safe
+                            content_buffer = content_buffer[safe_chars:]
+
+            # Tool calls logic (accumulation)
             current_tool_calls_payload = None
-
             if delta and delta.tool_calls:
                 if is_incremental:
                     current_tool_calls_payload = [
                         tc.model_dump() for tc in delta.tool_calls
                     ]
-
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in accumulated_tool_calls:
@@ -610,55 +698,131 @@ class DeepSeekProxy:
                             accumulated_tool_calls[idx]["function"][
                                 "name"
                             ] = tc.function.name
-
                     if tc.function.arguments:
                         accumulated_tool_calls[idx]["function"][
                             "arguments"
                         ] += tc.function.arguments
 
-            if chunk.choices and chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+            # Check upstream finish reason
+            upstream_finish = (
+                chunk.choices[0].finish_reason
+                if (chunk.choices and chunk.choices[0].finish_reason)
+                else "null"
+            )
+            if upstream_finish != "null":
+                finish_reason = upstream_finish
 
+            # Yield Content if we have something ready to go
             if is_incremental:
-                content_to_send = delta_content
-                reasoning_to_send = delta_reasoning
-                final_tool_calls = current_tool_calls_payload
-            else:
-                content_to_send = full_text
-                reasoning_to_send = full_reasoning
-                if accumulated_tool_calls:
-                    final_tool_calls = sorted(
-                        accumulated_tool_calls.values(), key=lambda x: x["index"]
+                if (
+                    content_to_yield
+                    or current_tool_calls_payload
+                    or (stop_triggered and finish_reason == "stop")
+                ):
+                    yield self._build_stream_response(
+                        content=content_to_yield,
+                        reasoning_content="",  # Already sent above
+                        tool_calls=current_tool_calls_payload,
+                        finish_reason=(
+                            finish_reason if stop_triggered else "null"
+                        ),  # Don't send upstream finish yet unless stopped
+                        usage=accumulated_usage,
+                        request_id=request_id,
                     )
-                else:
-                    final_tool_calls = None
 
-            message_body = {
-                "role": "assistant",
-                "content": content_to_send,
-                "reasoning_content": reasoning_to_send,
-            }
-
-            if final_tool_calls:
-                message_body["tool_calls"] = final_tool_calls
-
-            response_body = {
-                "output": {
-                    "choices": [
-                        {"message": message_body, "finish_reason": finish_reason}
-                    ]
-                },
-                "usage": accumulated_usage,
-                "request_id": request_id,
-            }
-            yield f"data: {json.dumps(response_body, ensure_ascii=False)}\n\n"
-
-            if finish_reason != "null":
+            if stop_triggered:
                 break
 
-    def _format_unary_response(self, completion, request_id: str):
+        # End of Stream
+
+        # If we have leftover buffer and weren't stopped, flush it now
+        if not stop_triggered and content_buffer and stop_sequences:
+            full_text += content_buffer
+            if is_incremental:
+                yield self._build_stream_response(
+                    content=content_buffer,
+                    reasoning_content="",
+                    tool_calls=None,
+                    finish_reason="null",
+                    usage=accumulated_usage,
+                    request_id=request_id,
+                )
+
+        if not is_incremental:
+            # For non-incremental (but stream=True upstream), we yield the whole thing at the end
+            # Applying stop logic to the full text collected
+            if stop_sequences:
+                earliest_idx, _ = self._find_earliest_stop(full_text, stop_sequences)
+                if earliest_idx != -1:
+                    full_text = full_text[:earliest_idx]
+                    finish_reason = "stop"
+
+            final_tool_calls = None
+            if accumulated_tool_calls:
+                final_tool_calls = sorted(
+                    accumulated_tool_calls.values(), key=lambda x: x["index"]
+                )
+
+            yield self._build_stream_response(
+                content=full_text,
+                reasoning_content=full_reasoning,
+                tool_calls=final_tool_calls,
+                finish_reason=finish_reason,
+                usage=accumulated_usage,
+                request_id=request_id,
+            )
+        else:
+            # Send final finish reason for incremental mode if not already sent via stop trigger
+            if not stop_triggered and finish_reason != "null":
+                yield self._build_stream_response(
+                    content="",
+                    reasoning_content="",
+                    tool_calls=None,
+                    finish_reason=finish_reason,
+                    usage=accumulated_usage,
+                    request_id=request_id,
+                )
+
+    def _build_stream_response(
+        self, content, reasoning_content, tool_calls, finish_reason, usage, request_id
+    ):
+        """Helper to format SSE data line"""
+        message_body = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning_content,
+        }
+        if tool_calls:
+            message_body["tool_calls"] = tool_calls
+
+        response_body = {
+            "output": {
+                "choices": [{"message": message_body, "finish_reason": finish_reason}]
+            },
+            "usage": usage,
+            "request_id": request_id,
+        }
+        return f"data: {json.dumps(response_body, ensure_ascii=False)}\n\n"
+
+    def _format_unary_response(
+        self, completion, request_id: str, stop_sequences: List[str]
+    ):
         choice = completion.choices[0]
         msg = choice.message
+
+        # --- Stop Logic (Unary) ---
+        final_content = msg.content
+        finish_reason = choice.finish_reason
+
+        if final_content and stop_sequences:
+            earliest_idx, _ = self._find_earliest_stop(final_content, stop_sequences)
+            if earliest_idx != -1:
+                final_content = final_content[:earliest_idx]
+                finish_reason = "stop"
+                logger.debug(
+                    f"[Stop Logic] Truncated unary response at index {earliest_idx}"
+                )
+
         usage_data = {
             "total_tokens": completion.usage.total_tokens,
             "input_tokens": completion.usage.prompt_tokens,
@@ -677,7 +841,7 @@ class DeepSeekProxy:
 
         message_body = {
             "role": msg.role,
-            "content": msg.content,
+            "content": final_content,  # Uses the potentially truncated content
             "reasoning_content": getattr(msg, "reasoning_content", ""),
         }
         if msg.tool_calls:
@@ -685,9 +849,7 @@ class DeepSeekProxy:
 
         response_body = {
             "output": {
-                "choices": [
-                    {"message": message_body, "finish_reason": choice.finish_reason}
-                ]
+                "choices": [{"message": message_body, "finish_reason": finish_reason}]
             },
             "usage": usage_data,
             "request_id": request_id,
@@ -775,15 +937,32 @@ def create_app() -> FastAPI:
     )
 
     @app.exception_handler(RequestValidationError)
+    @app.exception_handler(ValidationError)  # <--- 新增这行，捕获手动解析时的错误
     async def validation_exception_handler(request, exc):
-        err = exc.errors()[0]
+        try:
+            # 兼容两种异常获取 errors 的方式
+            errors = exc.errors() if hasattr(exc, "errors") else []
+        except Exception:
+            errors = [{"msg": str(exc), "loc": [], "type": "unknown"}]
+
+        if not errors:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": "Unknown validation error",
+                },
+            )
+
+        err = errors[0]
         error_msg = err.get("msg", "Invalid parameter")
         loc = err.get("loc", [])
         param_name = loc[-1] if loc else "unknown"
         path_str = ".".join([str(x) for x in loc if x != "body"])
         err_type = err.get("type")
-
         input_value = err.get("input")
+
+        # --- 以下保持原有的逻辑不变 ---
 
         if err_type == "int_parsing":
             if isinstance(input_value, str):
@@ -861,7 +1040,7 @@ def create_app() -> FastAPI:
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
-                    "message": "<400> InternalError.Algo.InvalidParameter: Unknown format of response_format, response_format should be a dict, includes 'type' and an optional key 'json_schema'. The response_format type from user is <class 'str'>.",
+                    "message": f"<400> InternalError.Algo.InvalidParameter: Unknown format of response_format, response_format should be a dict, includes 'type' and an optional key 'json_schema'. The response_format type from user is {type(input_value)}.",
                 },
             )
 
@@ -880,7 +1059,8 @@ def create_app() -> FastAPI:
                 },
             )
 
-        logger.error(f"Validation Error: {exc.errors()}")
+        # 兜底日志
+        logger.error(f"Validation Error: {errors}")
 
         return JSONResponse(
             status_code=400,
