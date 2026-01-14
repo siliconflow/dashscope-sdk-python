@@ -119,6 +119,8 @@ class Parameters(BaseModel):
     presence_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.0
 
+    prefix: Optional[str] = None
+
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
 
@@ -430,6 +432,8 @@ class DeepSeekProxy:
             openai_params["presence_penalty"] = params.presence_penalty
 
         extra_body = {}
+        if params.prefix is not None:
+            extra_body["prefix"] = params.prefix
         if params.repetition_penalty is not None:
             if params.repetition_penalty <= 0:
                 return JSONResponse(
