@@ -14,8 +14,6 @@ curl --location "http://localhost:8000/api/v1/services/aigc/text-generation/gene
     },
     "parameters": {
         "result_format": "message",
-        "incremental_output":true,
-        "max_tokens": 1024,
-        "top_p":"a"
+        "max_tokens": 1024
     }
 }'
