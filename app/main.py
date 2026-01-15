@@ -1,10 +1,8 @@
-import os
 import json
 import time
 import uuid
 import logging
 import logging.config
-import sys
 import asyncio
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
@@ -20,67 +18,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
+from app.config import (
+    get_logging_config,
+    SILICON_FLOW_BASE_URL,
+    MODEL_MAPPING,
+    DUMMY_KEY,
+    MAX_NUM_MSG_CURL_DUMP,
+    TIMEOUT_CONFIG,
+    SERVER_CONFIG
+)
+
 # Define context variable for request ID tracking
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
-class RequestIDFilter(logging.Filter):
-    def filter(self, record):
-        record.request_id = request_id_ctx.get()
-        return True
-
-# Structured logging configuration for production
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "filters": {
-        "request_id": {
-            "()": RequestIDFilter,
-        }
-    },
-    "formatters": {
-        "standard": {
-            # Format includes request_id for traceability
-            "format": "%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | [%(request_id)s] | %(message)s",
-            "datefmt": "%H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "level": "DEBUG",
-            "class": "logging.StreamHandler",
-            "formatter": "standard",
-            "filters": ["request_id"],
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "loggers": {
-        # Application logger
-        "DeepSeekProxy": {
-            "handlers": ["console"],
-            "level": "DEBUG",
-            "propagate": False,
-        },
-        # Capture uvicorn logs with consistent format
-        "uvicorn": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": False
-        },
-        "uvicorn.access": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": False
-        },
-    },
-}
-
 # Apply the logging configuration
-logging.config.dictConfig(LOGGING_CONFIG)
+logging.config.dictConfig(get_logging_config(request_id_ctx))
 logger = logging.getLogger("DeepSeekProxy")
-
-SILICON_FLOW_BASE_URL = os.getenv(
-    "SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1"
-)
 
 
 @dataclass
@@ -91,17 +44,7 @@ class ModelSpec:
 
 class ModelResolver:
     def __init__(self):
-        self._exact_map = {
-            "deepseek-v3": "deepseek-ai/DeepSeek-V3",
-            "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
-            "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
-            "deepseek-r1": "deepseek-ai/DeepSeek-R1",
-            "default": "deepseek-ai/DeepSeek-V3",
-            "pre-siliconflow/deepseek-v3": "deepseek-ai/DeepSeek-V3",
-            "pre-siliconflow/deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
-            "pre-siliconflow/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
-            "pre-siliconflow/deepseek-r1": "deepseek-ai/DeepSeek-R1",
-        }
+        self._exact_map = MODEL_MAPPING
 
     def resolve(self, input_model: str) -> ModelSpec:
         clean_name = input_model.strip()
@@ -116,9 +59,6 @@ class ModelResolver:
 
 
 model_resolver = ModelResolver()
-MODEL_MAPPING = model_resolver._exact_map
-DUMMY_KEY = "dummy-key"
-MAX_NUM_MSG_CURL_DUMP = 5
 
 
 class ServerState:
@@ -219,12 +159,9 @@ class DeepSeekProxy:
             api_key = extra_headers["x-api-key"]
 
         kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
-        HOUR = 60 * 60.0
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
-            timeout=httpx.Timeout(
-                connect=10.0, read=(2 * HOUR), write=600.0, pool=10.0
-            ),
+            timeout=httpx.Timeout(**TIMEOUT_CONFIG),
             default_headers=extra_headers,
             **kv,
         )
@@ -1297,4 +1234,4 @@ app = create_app()
 
 if __name__ == "__main__":
     # 本地直接运行 python main.py 时的入口
-    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=True)
+    uvicorn.run(app, **SERVER_CONFIG)
