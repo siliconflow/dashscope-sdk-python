@@ -15,8 +15,8 @@ HEADERS = {
     "X-DashScope-SSE": "enable",
 }
 
-# --- [NEW] MODEL MAPPING ---
-# 定义模型名称到 URL 路径的精确映射
+# --- MODEL MAPPING ---
+# Exact mapping from model name to URL path
 MODEL_PATH_MAP = {
     "deepseek-v3": "deepseek-ai/DeepSeek-V3",
     "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
@@ -28,7 +28,7 @@ MODEL_PATH_MAP = {
     "pre-siliconflow/deepseek-r1": "deepseek-ai/DeepSeek-R1",
 }
 
-# --- EXPECTED ERROR MESSAGES (COPIED FROM TABLE) ---
+# --- EXPECTED ERROR MESSAGES ---
 ERR_MSG_TOP_P_TYPE = "<400> InternalError.Algo.InvalidParameter: Input should be a valid number, unable to parse string as a number: parameters.top_p"
 ERR_MSG_TOP_P_RANGE = (
     "<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0]"
@@ -41,6 +41,7 @@ ERR_MSG_TOOL_CHOICE = '<400> InternalError.Algo.InvalidParameter: tool_choice is
 
 
 # --- HELPERS ---
+
 
 def make_request(payload: Dict[str, Any], stream: bool = True) -> requests.Response:
     """
@@ -57,17 +58,17 @@ def make_request(payload: Dict[str, Any], stream: bool = True) -> requests.Respo
     model_path = MODEL_PATH_MAP[raw_model_name]
     url = f"{BASE_URL_PREFIX}/{model_path}"
 
-    # 处理 Headers
+    # Handle Headers
     current_headers = HEADERS.copy()
     if not stream:
         current_headers["Accept"] = "application/json"
-        # 移除 SSE 标记
+        # Remove SSE flag
         if "X-DashScope-SSE" in current_headers:
             del current_headers["X-DashScope-SSE"]
 
-    # 注意：requests.post 的 stream 参数控制是否立即下载响应体，
-    # 但业务层面的流式由 headers 和 json body 决定，这里保持 requests 的 stream=True
-    # 只是为了方便拿到原始响应，或者统一设为 stream 变量也可以。
+    # Note: requests.post 'stream' parameter controls whether to immediately download
+    # the response body. We keep it True here to access raw response/iter_lines conveniently,
+    # regardless of the business logic stream setting.
     return requests.post(url, headers=current_headers, json=payload, stream=True)
 
 
@@ -131,7 +132,9 @@ class TestStrictErrorValidation:
             "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
-        assert_exact_error(response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT)
+        assert_exact_error(
+            response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
+        )
 
     def test_r1_enable_thinking_unsupported(self):
         payload = {
@@ -159,13 +162,24 @@ class TestFunctionalFixes:
     def test_tool_choice_invalid_error_mapping(self):
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
-            "input": {
-                "messages": [{"role": "user", "content": "Weather?"}]
-            },
+            "input": {"messages": [{"role": "user", "content": "Weather?"}]},
             "parameters": {
                 "result_format": "message",
                 "tool_choice": {"type": "get_current_weather"},
-                "tools": [{"type": "function", "function": {"name": "get_current_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"],
+                            },
+                        },
+                    }
+                ],
             },
         }
         response = make_request(payload)
@@ -178,7 +192,16 @@ class TestFunctionalFixes:
                 "messages": [
                     {"role": "system", "content": "sys"},
                     {"role": "user", "content": "user"},
-                    {"role": "assistant", "tool_calls": [{"function": {"arguments": "{}", "name": "fn"}, "id": "call_1", "type": "function"}]},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {"arguments": "{}", "name": "fn"},
+                                "id": "call_1",
+                                "type": "function",
+                            }
+                        ],
+                    },
                     {"role": "tool", "content": "res", "tool_call_id": "call_1"},
                 ]
             },
@@ -212,49 +235,47 @@ class TestFunctionalFixes:
 
     def test_non_streaming_request(self):
         """
-        [Row 16] 验证非流式返回 (incremental_output=false)
-        使用优化后的 make_request，代码更干净
+        Verify non-streaming response (incremental_output=false).
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3.2",
             "input": {"messages": [{"role": "user", "content": "Say hi"}]},
-            "parameters": {"incremental_output": False}, # 显式设置参数
+            "parameters": {"incremental_output": False},  # Explicitly set parameter
         }
 
-        # 调用优化后的 helper，传入 stream=False
         response = make_request(payload, stream=False)
 
-        assert response.status_code == 200, f"Non-streaming request failed: {response.text}"
+        assert (
+            response.status_code == 200
+        ), f"Non-streaming request failed: {response.text}"
         data = response.json()
-        # 非流式应该直接返回 output 字段，而不是 SSE 的 delta
+        # Non-streaming should return 'output' field directly, not SSE delta
         assert "output" in data, "Non-streaming response missing 'output' field"
 
     def test_stop_behavior_in_reasoning(self):
         """
-        [Updated] 验证 Stop 参数在 Reasoning 模型中的行为：
-        1. 确认 reasoning_content 能够正常返回 (不被误截断)。
-        2. 确认 stop 参数作用于正文 (content)，并正确截断。
+        Verify Stop parameter behavior in Reasoning models:
+        1. Ensure reasoning_content is returned (not truncated).
+        2. Ensure stop parameter applies to content and truncates correctly.
         """
-        # 设置一个具体的 Stop 词，诱导模型在正文中输出它
         target_stop_word = "Banana"
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
             "input": {
-                "messages": [{
-                    "role": "user",
-                    "content": f"Please think about the color of the sun, and then simply output the phrase: 'The sun is like a {target_stop_word}'"
-                }]
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"Please think about the color of the sun, and then simply output the phrase: 'The sun is like a {target_stop_word}'",
+                    }
+                ]
             },
-            "parameters": {
-                "stop": [target_stop_word],
-                "incremental_output": True  # 开启增量输出，避免内容重复
-            }
+            "parameters": {"stop": [target_stop_word], "incremental_output": True},
         }
 
         response = make_request(payload)
         assert response.status_code == 200
 
-        # --- SSE 解析逻辑 ---
+        # --- SSE Parsing Logic ---
         collected_reasoning = ""
         collected_content = ""
         final_finish_reason = None
@@ -263,8 +284,7 @@ class TestFunctionalFixes:
             if not line:
                 continue
 
-            # 解码 line
-            line_text = line.decode('utf-8')
+            line_text = line.decode("utf-8")
 
             if line_text.startswith("data:"):
                 json_str = line_text[5:].strip()
@@ -274,15 +294,14 @@ class TestFunctionalFixes:
                 try:
                     chunk = json.loads(json_str)
 
-                    # --- [修复 1] 适配 DashScope 结构：先取 output ---
+                    # Adapt to DashScope structure: get output first
                     output = chunk.get("output", {})
                     choices = output.get("choices", [])
 
                     if not choices:
                         continue
 
-                    # --- [修复 2] 适配 DashScope 结构：取 message 而非 delta ---
-                    # DashScope 在流式传输中也使用 message 字段
+                    # Adapt to DashScope structure: use 'message' instead of 'delta'
                     message = choices[0].get("message", {})
 
                     if "reasoning_content" in message:
@@ -297,20 +316,26 @@ class TestFunctionalFixes:
                 except json.JSONDecodeError:
                     continue
 
-        # --- 断言验证 ---
+        # --- Assertions ---
         print(f"\n[DEBUG] Collected Reasoning Length: {len(collected_reasoning)}")
         print(f"[DEBUG] Collected Content: '{collected_content}'")
         print(f"[DEBUG] Finish Reason: {final_finish_reason}")
 
-        # 1. 验证 reasoning 内容回来了 (Think 过程不应为空)
-        assert len(collected_reasoning) > 10, f"Expected significant reasoning content from R1 model. {collected_reasoning}"
+        # 1. Verify reasoning content is present (Think process should not be empty)
+        assert (
+            len(collected_reasoning) > 10
+        ), f"Expected significant reasoning content from R1 model. {collected_reasoning}"
 
-        # 2. 验证 Stop 生效 (Content 应该包含 'The sun is like a ' 但不包含 'Banana')
+        # 2. Verify Stop worked (Content should include prefix but stop before target word)
         assert "The sun" in collected_content
-        assert target_stop_word not in collected_content, f"Content should stop before '{target_stop_word}'"
+        assert (
+            target_stop_word not in collected_content
+        ), f"Content should stop before '{target_stop_word}'"
 
-        # 3. 验证 finish_reason 是 stop
-        assert final_finish_reason == "stop", f"Expected finish_reason to be 'stop', but got '{final_finish_reason}'"
+        # 3. Verify finish_reason is stop
+        assert (
+            final_finish_reason == "stop"
+        ), f"Expected finish_reason to be 'stop', but got '{final_finish_reason}'"
 
     def test_thinking_budget_behavior(self):
         payload = {
