@@ -247,7 +247,7 @@ class TestFunctionalFixes:
             },
             "parameters": {
                 "stop": [target_stop_word],
-                # R1 自动开启思考，但也可能需要显式参数，视具体后端实现而定，这里保持默认或按需添加
+                "incremental_output": True  # 开启增量输出，避免内容重复
             }
         }
 
@@ -273,22 +273,24 @@ class TestFunctionalFixes:
 
                 try:
                     chunk = json.loads(json_str)
-                    choices = chunk.get("choices", [])
+
+                    # --- [修复 1] 适配 DashScope 结构：先取 output ---
+                    output = chunk.get("output", {})
+                    choices = output.get("choices", [])
+
                     if not choices:
                         continue
 
-                    delta = choices[0].get("delta", {})
+                    # --- [修复 2] 适配 DashScope 结构：取 message 而非 delta ---
+                    # DashScope 在流式传输中也使用 message 字段
+                    message = choices[0].get("message", {})
 
-                    # 1. 收集 reasoning_content
-                    # 注意：有些实现可能叫 reasoning_text，视具体 API 定义，这里假设是 reasoning_content
-                    if "reasoning_content" in delta:
-                        collected_reasoning += delta["reasoning_content"]
+                    if "reasoning_content" in message:
+                        collected_reasoning += message["reasoning_content"]
 
-                    # 2. 收集正文 content
-                    if "content" in delta:
-                        collected_content += delta["content"]
+                    if "content" in message:
+                        collected_content += message["content"]
 
-                    # 3. 捕捉 finish_reason
                     if choices[0].get("finish_reason"):
                         final_finish_reason = choices[0].get("finish_reason")
 
