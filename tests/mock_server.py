@@ -34,16 +34,21 @@ _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 # --- Model Abstraction & Resolution ---
 from dataclasses import dataclass
 
+
 @dataclass
 class ModelSpec:
-    real_model_name: str       # 发送给上游 SiliconFlow 的真实模型名
-    is_reasoning: bool = False # 是否为推理模型 (R1系列)
-    supports_thinking: bool = False # 是否支持显式开启 thinking 参数 (V3通常不需要，R1自动开启)
+    real_model_name: str  # 发送给上游 SiliconFlow 的真实模型名
+    is_reasoning: bool = False  # 是否为推理模型 (R1系列)
+    supports_thinking: bool = (
+        False  # 是否支持显式开启 thinking 参数 (V3通常不需要，R1自动开启)
+    )
+
 
 class ModelResolver:
     """
     模型解析器：负责把乱七八糟的模型路径解析成标准的能力配置
     """
+
     def __init__(self):
         # 基础映射表 (保留旧逻辑兼容)
         self._exact_map = {
@@ -76,8 +81,9 @@ class ModelResolver:
             is_reasoning=is_r1,
             # R1 自身就是推理模型，通常 API 不接受 enable_thinking 参数或者行为不同
             # V3 如果未来支持 thinking，可以在这里扩展逻辑
-            supports_thinking=not is_r1
+            supports_thinking=not is_r1,
         )
+
 
 # 全局单例
 model_resolver = ModelResolver()
@@ -256,7 +262,11 @@ class DeepSeekProxy:
         model_spec = model_resolver.resolve(req_data.model)
 
         # Model existence check (保留基础校验)
-        if not skip_model_exist_check and req_data.model not in MODEL_MAPPING and not model_spec.real_model_name:
+        if (
+            not skip_model_exist_check
+            and req_data.model not in MODEL_MAPPING
+            and not model_spec.real_model_name
+        ):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -655,8 +665,30 @@ class DeepSeekProxy:
             logger.error(
                 f"[request id: {initial_request_id}] Upstream API Error: {str(e)}"
             )
+
+            # Default error code
             error_code = "InternalError"
-            if isinstance(e, RateLimitError):
+
+            # Handle HTTP 400 errors (typically parameter errors or model not found)
+            if e.status_code == 400:
+                error_code = "InvalidParameter"
+                # Check if the error message contains model not found indication
+                error_msg = str(e)
+                if (
+                    "Model does not exist" in error_msg
+                    or "model not found" in error_msg.lower()
+                ):
+                    # Return the exact message expected by tests
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": "Model not exist.",
+                            "request_id": initial_request_id,
+                        },
+                    )
+
+            elif isinstance(e, RateLimitError):
                 error_code = "Throttling.RateQuota"
             elif isinstance(e, AuthenticationError):
                 error_code = "InvalidApiKey"
