@@ -48,8 +48,11 @@ def make_request(payload: Dict[str, Any]) -> requests.Response:
     """Helper to send POST request using the Dynamic Path URL structure."""
     raw_model_name = payload.get("model")
 
-    # 获取映射后的真实路径，如果没有在映射中则使用原名称
-    model_path = MODEL_PATH_MAP.get(raw_model_name, raw_model_name)
+    # [MODIFIED] 严格检查：如果模型名称不在映射中，直接报错（Fail Test）
+    if raw_model_name not in MODEL_PATH_MAP:
+        pytest.fail(f"Configuration Error: Model '{raw_model_name}' is not defined in MODEL_PATH_MAP. Please update the mapping.")
+
+    model_path = MODEL_PATH_MAP[raw_model_name]
 
     # [注释] 测试的时候必须是http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-V3这样的URL
     url = f"{BASE_URL_PREFIX}/{model_path}"
@@ -77,9 +80,7 @@ def assert_exact_error(
 
 
 # --- TEST SUITE ---
-# (之前的 TestStrictErrorValidation 类代码保持不变...)
 class TestStrictErrorValidation:
-    # ... 此处省略类中的方法，因逻辑未变 ...
     def test_invalid_parameter_type_top_p(self):
         payload = {
             "model": "pre-siliconflow/deepseek-v3",
@@ -98,7 +99,6 @@ class TestStrictErrorValidation:
         response = make_request(payload)
         assert_exact_error(response, "InvalidParameter", ERR_MSG_TOP_P_RANGE)
 
-    # ... 其他测试用例保持不变 ...
     def test_invalid_parameter_range_temperature(self):
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
@@ -133,7 +133,6 @@ class TestStrictErrorValidation:
 
 
 class TestFunctionalFixes:
-    # ... 之前的测试用例保持不变 ...
     def test_r1_usage_structure_no_text_tokens(self):
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
@@ -202,7 +201,7 @@ class TestFunctionalFixes:
 
     def test_non_streaming_request(self):
         """
-        [Updated] 验证非流式返回，需同样应用 URL 映射逻辑
+        [Updated] 验证非流式返回，需同样应用 URL 映射逻辑和严格检查
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3.2",
@@ -210,11 +209,16 @@ class TestFunctionalFixes:
             "parameters": {},
         }
 
-        # 1. 解析模型并应用映射
+        # 1. 解析模型并应用严格映射检查
         raw_model_name = payload.get("model")
-        model_path = MODEL_PATH_MAP.get(raw_model_name, raw_model_name)
 
-        # 2. 拼接 URL (测试的时候必须是http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-V3这样的URL)
+        # [MODIFIED] 严格检查
+        if raw_model_name not in MODEL_PATH_MAP:
+             pytest.fail(f"Configuration Error: Model '{raw_model_name}' is not defined in MODEL_PATH_MAP. Please update the mapping.")
+
+        model_path = MODEL_PATH_MAP[raw_model_name]
+
+        # 2. 拼接 URL
         url = f"{BASE_URL_PREFIX}/{model_path}"
 
         headers_no_stream = HEADERS.copy()
