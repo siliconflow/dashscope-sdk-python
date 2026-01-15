@@ -231,25 +231,84 @@ class TestFunctionalFixes:
 
     def test_stop_behavior_in_reasoning(self):
         """
-        [Row 7] stop 在 reasoning content 阶段生效
-        验证：设置 stop word 为思考过程中必然出现的词（如 'step' 或 'thinking'），
-        确认模型是否异常截断或按预期行为处理（取决于预期是忽略还是截断）。
+        [Updated] 验证 Stop 参数在 Reasoning 模型中的行为：
+        1. 确认 reasoning_content 能够正常返回 (不被误截断)。
+        2. 确认 stop 参数作用于正文 (content)，并正确截断。
         """
+        # 设置一个具体的 Stop 词，诱导模型在正文中输出它
+        target_stop_word = "Banana"
         payload = {
-            "model": "pre-siliconflow/deepseek-r1", # 必须是思考模型
-            "input": {"messages": [{"role": "user", "content": "Count from 1 to 5 step by step"}]},
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {
+                "messages": [{
+                    "role": "user",
+                    "content": f"Please think about the color of the sun, and then simply output the phrase: 'The sun is like a {target_stop_word}'"
+                }]
+            },
             "parameters": {
-                "stop": ["step"], # 这是一个在思考过程中很容易出现的词
-                "enable_thinking": True
+                "stop": [target_stop_word],
+                # R1 自动开启思考，但也可能需要显式参数，视具体后端实现而定，这里保持默认或按需添加
             }
         }
-        response = make_request(payload)
 
-        # 这里的断言取决于你们的预期：
-        # 如果预期是不支持（即不会截断），则 status_code 200 且内容完整。
-        # 如果预期是会截断导致格式错误，则捕获错误。
+        response = make_request(payload)
         assert response.status_code == 200
-        # 进一步可以检查 response.text 中是否包含 reasoning_content
+
+        # --- SSE 解析逻辑 ---
+        collected_reasoning = ""
+        collected_content = ""
+        final_finish_reason = None
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            # 解码 line
+            line_text = line.decode('utf-8')
+
+            if line_text.startswith("data:"):
+                json_str = line_text[5:].strip()
+                if json_str == "[DONE]":
+                    break
+
+                try:
+                    chunk = json.loads(json_str)
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+
+                    delta = choices[0].get("delta", {})
+
+                    # 1. 收集 reasoning_content
+                    # 注意：有些实现可能叫 reasoning_text，视具体 API 定义，这里假设是 reasoning_content
+                    if "reasoning_content" in delta:
+                        collected_reasoning += delta["reasoning_content"]
+
+                    # 2. 收集正文 content
+                    if "content" in delta:
+                        collected_content += delta["content"]
+
+                    # 3. 捕捉 finish_reason
+                    if choices[0].get("finish_reason"):
+                        final_finish_reason = choices[0].get("finish_reason")
+
+                except json.JSONDecodeError:
+                    continue
+
+        # --- 断言验证 ---
+        print(f"\n[DEBUG] Collected Reasoning Length: {len(collected_reasoning)}")
+        print(f"[DEBUG] Collected Content: '{collected_content}'")
+        print(f"[DEBUG] Finish Reason: {final_finish_reason}")
+
+        # 1. 验证 reasoning 内容回来了 (Think 过程不应为空)
+        assert len(collected_reasoning) > 10, "Expected significant reasoning content from R1 model."
+
+        # 2. 验证 Stop 生效 (Content 应该包含 'The sun is like a ' 但不包含 'Banana')
+        assert "The sun" in collected_content
+        assert target_stop_word not in collected_content, f"Content should stop before '{target_stop_word}'"
+
+        # 3. 验证 finish_reason 是 stop
+        assert final_finish_reason == "stop", f"Expected finish_reason to be 'stop', but got '{final_finish_reason}'"
 
     def test_thinking_budget_behavior(self):
         payload = {
