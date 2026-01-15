@@ -424,17 +424,6 @@ class DeepSeekProxy:
                 },
             )
 
-        if params.enable_thinking:
-            for msg in messages:
-                if msg.get("partial"):
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "code": "InvalidParameter",
-                            "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
-                        },
-                    )
-
         # Stop parameter extraction
         proxy_stop_list: List[str] = []
         if params.stop:
@@ -456,6 +445,17 @@ class DeepSeekProxy:
         # --- Request Parameters Assembly ---
         target_model = self._get_mapped_model(req_data.model)
         messages = self._convert_input_to_messages(req_data.input)
+
+        if params.enable_thinking:
+            for msg in messages:
+                if msg.get("partial"):
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
+                        },
+                    )
 
         should_stream = (
             params.incremental_output or params.enable_thinking or force_stream
