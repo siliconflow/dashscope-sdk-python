@@ -29,9 +29,7 @@ ERR_MSG_PARTIAL_THINKING_CONFLICT = "<400> InternalError.Algo.InvalidParameter: 
 ERR_MSG_R1_THINKING = "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}"
 
 # [UPDATED] tool_choice 校验错误 (根据百炼返回更新)
-ERR_MSG_TOOL_CHOICE = (
-    '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]'
-)
+ERR_MSG_TOOL_CHOICE = '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]'
 
 # --- HELPERS ---
 
