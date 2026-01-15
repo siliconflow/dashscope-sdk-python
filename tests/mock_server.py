@@ -447,7 +447,7 @@ class DeepSeekProxy:
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
-                    "message": "DeepSeek R1 does not support specific tool_choice binding (dict) while thinking logic is active.",
+                    "message": '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]',
                 },
             )
 
