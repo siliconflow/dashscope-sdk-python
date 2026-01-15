@@ -18,13 +18,18 @@ HEADERS = {
 # --- EXPECTED ERROR MESSAGES (COPIED FROM TABLE) ---
 # 定义预期错误常量，确保逐字对齐
 ERR_MSG_TOP_P_TYPE = "<400> InternalError.Algo.InvalidParameter: Input should be a valid number, unable to parse string as a number: parameters.top_p"
-ERR_MSG_TOP_P_RANGE = "<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0]"
-ERR_MSG_TEMP_RANGE = "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]"
+ERR_MSG_TOP_P_RANGE = (
+    "<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0]"
+)
+ERR_MSG_TEMP_RANGE = (
+    "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]"
+)
 ERR_MSG_PARTIAL_THINKING_CONFLICT = "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true"
 # R1 不支持 enable_thinking 的报错 (注意：表格中该报错包含 Python 字典的字符串表示，需严格匹配引号)
 ERR_MSG_R1_THINKING = "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}"
 
 # --- HELPERS ---
+
 
 def make_request(payload: Dict[str, Any]) -> requests.Response:
     """Helper to send POST request using the Dynamic Path URL structure."""
@@ -32,7 +37,10 @@ def make_request(payload: Dict[str, Any]) -> requests.Response:
     url = f"{BASE_URL_PREFIX}/{model_path}"
     return requests.post(url, headers=HEADERS, json=payload, stream=True)
 
-def assert_exact_error(response: requests.Response, expected_code_str: str, expected_message: str):
+
+def assert_exact_error(
+    response: requests.Response, expected_code_str: str, expected_message: str
+):
     """
     严格校验错误返回：
     1. HTTP 状态码通常为 4xx 或 500 (根据表格，部分 4xx 业务错误可能返回 200 或 400，此处以解析 body 为主)
@@ -46,13 +54,19 @@ def assert_exact_error(response: requests.Response, expected_code_str: str, expe
 
     # 1. Check Error Code (e.g., 'InvalidParameter' or 'InternalError')
     actual_code = data.get("code")
-    assert actual_code == expected_code_str, f"Error Code mismatch.\nExpected: {expected_code_str}\nActual:   {actual_code}"
+    assert (
+        actual_code == expected_code_str
+    ), f"Error Code mismatch.\nExpected: {expected_code_str}\nActual:   {actual_code}"
 
     # 2. Check Error Message (Exact String Match)
     actual_message = data.get("message")
-    assert actual_message == expected_message, f"Error Message mismatch.\nExpected: {expected_message}\nActual:   {actual_message}"
+    assert (
+        actual_message == expected_message
+    ), f"Error Message mismatch.\nExpected: {expected_message}\nActual:   {actual_message}"
+
 
 # --- TEST SUITE ---
+
 
 class TestStrictErrorValidation:
 
@@ -65,7 +79,7 @@ class TestStrictErrorValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": "a"}
+            "parameters": {"top_p": "a"},
         }
         response = make_request(payload)
 
@@ -74,7 +88,7 @@ class TestStrictErrorValidation:
         assert_exact_error(
             response,
             expected_code_str="InvalidParameter",
-            expected_message=ERR_MSG_TOP_P_TYPE
+            expected_message=ERR_MSG_TOP_P_TYPE,
         )
 
     def test_invalid_parameter_range_top_p(self):
@@ -86,14 +100,14 @@ class TestStrictErrorValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": 0}
+            "parameters": {"top_p": 0},
         }
         response = make_request(payload)
 
         assert_exact_error(
             response,
             expected_code_str="InvalidParameter",
-            expected_message=ERR_MSG_TOP_P_RANGE
+            expected_message=ERR_MSG_TOP_P_RANGE,
         )
 
     def test_invalid_parameter_range_temperature(self):
@@ -105,14 +119,14 @@ class TestStrictErrorValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"temperature": 2.1}
+            "parameters": {"temperature": 2.1},
         }
         response = make_request(payload)
 
         assert_exact_error(
             response,
             expected_code_str="InvalidParameter",
-            expected_message=ERR_MSG_TEMP_RANGE
+            expected_message=ERR_MSG_TEMP_RANGE,
         )
 
     def test_conflict_prefix_and_thinking(self):
@@ -126,17 +140,17 @@ class TestStrictErrorValidation:
             "input": {
                 "messages": [
                     {"role": "user", "content": "你好"},
-                    {"role": "assistant", "partial": True, "content": "你好，我是"}
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
                 ]
             },
-            "parameters": {"enable_thinking": True}
+            "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
 
         assert_exact_error(
             response,
             expected_code_str="InvalidParameter",
-            expected_message=ERR_MSG_PARTIAL_THINKING_CONFLICT
+            expected_message=ERR_MSG_PARTIAL_THINKING_CONFLICT,
         )
 
     def test_r1_enable_thinking_unsupported(self):
@@ -148,7 +162,7 @@ class TestStrictErrorValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"enable_thinking": True}
+            "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
 
@@ -156,8 +170,9 @@ class TestStrictErrorValidation:
         assert_exact_error(
             response,
             expected_code_str="InternalError",
-            expected_message=ERR_MSG_R1_THINKING
+            expected_message=ERR_MSG_R1_THINKING,
         )
+
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
