@@ -1,35 +1,29 @@
 import multiprocessing
 import os
 
-# 获取 CPU 核心数 (16)
-cores = multiprocessing.cpu_count()
-
-# --- 优化点 1: Worker 数量 ---
-# 对于 Uvicorn (异步) 转发服务，Worker 数等于 CPU 核心数通常性能最佳。
-# 太多 Worker 会导致 CPU 上下文切换开销，反而降低 QPS。
-# 建议设置为 16 (和核数一致) 或者 17 (16+1)
-workers = int(os.getenv("WORKERS", cores))
-
-# 指定 Worker 类型
+# --- 基础配置 ---
+bind = "0.0.0.0:8000"
+workers = int(os.getenv("WORKERS", multiprocessing.cpu_count())) # 推荐 16
 worker_class = "uvicorn.workers.UvicornWorker"
 
-# 绑定地址
-bind = "0.0.0.0:8000"
+# --- 超时配置 (关键修改) ---
+# 1. 核心超时时间：2小时 (7200秒)
+# 这意味着如果 Worker 在 2 小时内没有任何响应（心跳），才会被 Master 杀掉。
+# 在异步模式下，只要 Event Loop 没卡死，Worker 就不会被杀，
+# 这能保证长连接即使在等待上游流式输出时也能存活。
+timeout = 7200
 
-# --- 优化点 2: 积压队列 ---
-# 应对 300 并发瞬间涌入的情况，防止连接被拒绝
-backlog = 2048
+# 2. 优雅退出超时
+# 当你执行 kill -HUP 或重启服务时，Gunicorn 会等待 7200 秒让当前请求跑完。
+# 必须设置这个，否则重启时会切断正在生成的长任务。
+graceful_timeout = 7200
 
-# 日志级别 (压测时 Warning 刚好，减少磁盘 I/O)
-loglevel = "warning"
+# 3. Keepalive
+# 建议设为 60-120 秒。
+# 作用：防止中间的网络设备（防火墙/路由器）因为 TCP 连接长时间没数据包通过而静默掐断连接。
+keepalive = 75
 
-# --- 优化点 3: 超时策略 ---
-# 120秒对于 DeepSeek 的长文本 (80k context) 是安全的。
-# 但考虑到网络波动，配合 keepalive 防止中间断连。
-timeout = 120
-
-# 建议适当调大，配合压测工具的长连接复用，减少 TCP 握手消耗
-keepalive = 65
-
-# 预加载应用代码，加快启动速度并节省内存（可选，但推荐）
-preload_app = True
+# --- 其他 ---
+loglevel = "info"
+accesslog = "-"
+errorlog = "-"
