@@ -22,7 +22,6 @@ MODEL_PATH_MAP = {
     "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
     "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
-    "default": "deepseek-ai/DeepSeek-V3",
     "pre-siliconflow/deepseek-v3": "deepseek-ai/DeepSeek-V3",
     "pre-siliconflow/deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
     "pre-siliconflow/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
