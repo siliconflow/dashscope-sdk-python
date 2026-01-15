@@ -5,6 +5,7 @@ import uuid
 import logging
 import threading
 import multiprocessing
+import asyncio
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -76,7 +77,7 @@ class ServerState:
         self.request_queue: Optional[multiprocessing.Queue] = None
         self.response_queue: Optional[multiprocessing.Queue] = None
         self.active_requests: int = 0
-        self.lock = threading.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self.is_mock_mode = False
 
     @classmethod
@@ -85,27 +86,59 @@ class ServerState:
             cls._instance = ServerState()
         return cls._instance
 
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Lazy initialization of the lock to ensure it attaches to the running loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
     def set_queues(self, req_q, res_q):
         self.request_queue = req_q
         self.response_queue = res_q
         self.is_mock_mode = True
         logger.warning("!!! Server running in MOCK MODE via Queue Injection !!!")
 
-    def increment_request(self):
-        with self.lock:
+    async def increment_request(self):
+        async with self.lock:
             self.active_requests += 1
 
-    def decrement_request(self):
-        with self.lock:
+    async def decrement_request(self):
+        async with self.lock:
             self.active_requests -= 1
 
-    @property
-    def snapshot(self):
-        with self.lock:
+    async def get_snapshot(self) -> Dict[str, Any]:
+        """Async safe snapshot retrieval."""
+        async with self.lock:
             return {
                 "active_requests": self.active_requests,
                 "is_mock_mode": self.is_mock_mode,
             }
+
+    async def mock_request_interaction(
+        self, request_body: Dict[str, Any], timeout: float = 10.0
+    ) -> Dict[str, Any]:
+        """
+        Handles the interaction with the multiprocessing Queue in a non-blocking way.
+        This fixes the blocking issue by offloading queue.get/put to the executor.
+        """
+        loop = asyncio.get_running_loop()
+
+        # 1. Offload the blocking put operation
+        await loop.run_in_executor(None, self.request_queue.put, request_body)
+
+        # 2. Offload the blocking get operation
+        # We use a lambda to pass the timeout to the queue.get method
+        def blocking_get():
+            return self.response_queue.get(timeout=timeout)
+
+        response_data = await loop.run_in_executor(None, blocking_get)
+
+        return (
+            json.loads(response_data)
+            if isinstance(response_data, str)
+            else response_data
+        )
 
 
 SERVER_STATE = ServerState.get_instance()
@@ -943,22 +976,23 @@ class DeepSeekProxy:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    stop_event = threading.Event()
-
-    def epoch_clock():
-        while not stop_event.is_set():
-            time.sleep(5)
-            state = SERVER_STATE.snapshot
+    async def epoch_clock():
+        while True:
+            await asyncio.sleep(5)
+            state = await SERVER_STATE.get_snapshot()
             if state["active_requests"] > 0 or state["is_mock_mode"]:
                 logger.info(
                     f"[Monitor] Active: {state['active_requests']} | "
                     f"Mode: {'MOCK' if state['is_mock_mode'] else 'PRODUCTION'}"
                 )
 
-    monitor_thread = threading.Thread(target=epoch_clock, daemon=True)
-    monitor_thread.start()
+    monitor_task = asyncio.create_task(epoch_clock())
     yield
-    stop_event.set()
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except asyncio.CancelledError:
+        pass
 
 
 def _prepare_proxy_and_headers(
@@ -1148,13 +1182,15 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
-        SERVER_STATE.increment_request()
+        # Await the async increment
+        await SERVER_STATE.increment_request()
         start_time = time.time()
         try:
             response = await call_next(request)
             return response
         finally:
-            SERVER_STATE.decrement_request()
+            # Await the async decrement
+            await SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
             if duration > 1000:
                 logger.warning(
@@ -1203,19 +1239,15 @@ def create_app() -> FastAPI:
             if body:
                 try:
                     if _MOCK_ENV_API_KEY:
-                        shadow_proxy = DeepSeekProxy(api_key=_MOCK_ENV_API_KEY)
+                        # Just to ensure init consistency even if not used
+                        _ = DeepSeekProxy(api_key=_MOCK_ENV_API_KEY)
                 except Exception:
                     pass
 
             try:
                 raw_body = await request.json()
-                SERVER_STATE.request_queue.put(raw_body)
-                response_data = SERVER_STATE.response_queue.get(timeout=10)
-                response_json = (
-                    json.loads(response_data)
-                    if isinstance(response_data, str)
-                    else response_data
-                )
+                # Use the new async-safe mock interaction
+                response_json = await SERVER_STATE.mock_request_interaction(raw_body)
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
             except Exception as e:
@@ -1270,12 +1302,9 @@ def create_app() -> FastAPI:
                     "headers": dict(request.headers),
                     "body": body,
                 }
-                SERVER_STATE.request_queue.put(req_record)
-                response_data = SERVER_STATE.response_queue.get(timeout=5)
-                response_json = (
-                    json.loads(response_data)
-                    if isinstance(response_data, str)
-                    else response_data
+                # Use the new async-safe mock interaction
+                response_json = await SERVER_STATE.mock_request_interaction(
+                    req_record, timeout=5.0
                 )
                 status_code = response_json.pop("status_code", 200)
                 return JSONResponse(content=response_json, status_code=status_code)
