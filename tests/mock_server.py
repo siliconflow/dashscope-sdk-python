@@ -452,13 +452,7 @@ class DeepSeekProxy:
             )
 
         if model_spec.is_reasoning and params.enable_thinking:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "code": "InternalError",
-                    "message": "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}",
-                },
-            )
+            params.enable_thinking = False
 
         proxy_stop_list: List[str] = []
         if params.stop:
