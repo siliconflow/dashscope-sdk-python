@@ -69,7 +69,7 @@ def get_logging_config(request_id_ctx=None):
         },
         "handlers": {
             "console": {
-                "level": "DEBUG",
+                "level": "INFO",
                 "class": "logging.StreamHandler",
                 "formatter": "standard",
                 "filters": ["request_id"],
@@ -79,7 +79,7 @@ def get_logging_config(request_id_ctx=None):
         "loggers": {
             "DeepSeekProxy": {
                 "handlers": ["console"],
-                "level": "DEBUG",
+                "level": "INFO",
                 "propagate": False,
             },
             "uvicorn": {"handlers": ["console"], "level": "INFO", "propagate": False},
