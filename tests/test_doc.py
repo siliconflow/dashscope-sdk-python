@@ -1,3 +1,9 @@
+# ... (保留上面的 Server 代码不变) ...
+
+# ==========================================
+#       UPDATED TEST SUITE (Dynamic URL)
+# ==========================================
+
 import pytest
 import json
 import requests
@@ -6,9 +12,9 @@ from dataclasses import dataclass
 import os
 
 # --- CONSTANTS & CONFIGURATION ---
-GATEWAY_URL = "http://localhost:8000/api/v1/services/aigc/text-generation/generation"
-# 如果需要测试硅基流动的真实环境，请切换 URL 并设置 API KEY
-# GATEWAY_URL = "https://api-bailian.siliconflow.cn/api/v1/services/aigc/text-generation/generation"
+
+# 修改为动态 URL 的基础路径
+GATEWAY_BASE_URL = "http://localhost:8000/siliconflow/models"
 
 API_KEY = os.getenv("SILICONFLOW_API_KEY", "test_api_key")
 
@@ -16,7 +22,7 @@ HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
     "Accept": "text/event-stream",
-    "X-DashScope-SSE": "enable",  # 模拟 DashScope 协议头
+    "X-DashScope-SSE": "enable",
 }
 
 # --- TOOL DEFINITIONS ---
@@ -43,16 +49,13 @@ TOOL_VECTOR_WEATHER = [
 
 # --- HELPERS ---
 
-
 @dataclass
 class SSEFrame:
     """Formal representation of a Server-Sent Event frame for validation."""
-
     id: str
     output: Dict[str, Any]
     usage: Dict[str, Any]
     request_id: str
-
 
 def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, None]:
     """Parses the raw SSE stream."""
@@ -64,9 +67,7 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                 try:
                     data = json.loads(json_str)
                     yield SSEFrame(
-                        id=data.get("output", {})
-                        .get("choices", [{}])[0]
-                        .get("id", "unknown"),
+                        id=data.get("output", {}).get("choices", [{}])[0].get("id", "unknown"),
                         output=data.get("output", {}),
                         usage=data.get("usage", {}),
                         request_id=data.get("request_id", ""),
@@ -74,14 +75,27 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                 except json.JSONDecodeError:
                     continue
 
+def make_request(payload: Dict[str, Any]):
+    """
+    Helper to send POST request using the Dynamic Path URL.
+    Extracts 'model' from payload to construct the URL:
+    POST /siliconflow/models/{model_path}
+    """
+    # 提取模型名称用于构建 URL
+    model_path = payload.get("model")
 
-def make_request(payload):
-    """Helper to send POST request."""
-    return requests.post(GATEWAY_URL, headers=HEADERS, json=payload, stream=True)
+    if not model_path:
+        raise ValueError("Payload must contain 'model' field for dynamic URL construction")
+
+    # 构建动态 URL
+    # 例如: http://localhost:8000/siliconflow/models/pre-siliconflow/deepseek-v3
+    url = f"{GATEWAY_BASE_URL}/{model_path}"
+
+    # 发送请求 (Payload 中保留 model 字段通常没问题，服务器端代码会再次处理或忽略)
+    return requests.post(url, headers=HEADERS, json=payload, stream=True)
 
 
 # --- TEST SUITE ---
-
 
 class TestParameterValidation:
     """
@@ -91,7 +105,7 @@ class TestParameterValidation:
     def test_invalid_parameter_type_top_p(self):
         """
         Case: parameters.top_p 输入字符串 'a'，预期返回 400 InvalidParameter。
-        Bug描述: 曾返回 InternalError 500。
+        URL: /siliconflow/models/pre-siliconflow/deepseek-v3
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3",
@@ -101,21 +115,18 @@ class TestParameterValidation:
         response = make_request(payload)
 
         # 验证状态码不应为 500
-        assert (
-            response.status_code != 500
-        ), "Should not return 500 for invalid parameter type"
+        assert response.status_code != 500, "Should not return 500 for invalid parameter type"
         assert response.status_code == 400
 
         data = response.json()
-        assert "InvalidParameter" in data.get(
-            "code", ""
-        ) or "InvalidParameter" in data.get("message", "")
+        assert "InvalidParameter" in data.get("code", "") or "InvalidParameter" in data.get("message", "")
 
     @pytest.mark.parametrize("top_p_value", [0, 0.0])
     def test_invalid_parameter_range_top_p(self, top_p_value):
         """
         Case: pre-siliconflow-deepseek-v3.1 top_p取值范围 (0, 1.0]。
         测试边界值 0，预期报错。
+        URL: /siliconflow/models/pre-siliconflow/deepseek-v3.1
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
@@ -154,6 +165,7 @@ class TestDeepSeekR1Specifics:
         """
         Case: .usage.output_tokens_details 该路径下不应该返回 text_tokens 字段。
         R1 模型推理侧可能没有 text_tokens。
+        URL: /siliconflow/models/pre-siliconflow/deepseek-r1
         """
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
@@ -172,9 +184,7 @@ class TestDeepSeekR1Specifics:
         # 验证 output_tokens_details 存在
         assert output_details, "output_tokens_details missing"
         # 验证不包含 text_tokens (根据表格描述这是预期行为)
-        assert (
-            "text_tokens" not in output_details
-        ), "R1 usage should not contain text_tokens"
+        assert "text_tokens" not in output_details, "R1 usage should not contain text_tokens"
         # 验证包含 reasoning_tokens
         assert "reasoning_tokens" in output_details
 
@@ -204,6 +214,7 @@ class TestAdvancedFeatures:
         """
         Case: 思考模式下(enable_thinking=true)，不支持前缀续写(partial=true)。
         预期返回: 400 InvalidParameter.
+        URL: /siliconflow/models/pre-siliconflow/deepseek-v3.2
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3.2",
@@ -219,9 +230,7 @@ class TestAdvancedFeatures:
 
         assert response.status_code == 400
         data = response.json()
-        assert "Partial mode is not supported when enable_thinking is true" in data.get(
-            "message", ""
-        )
+        assert "Partial mode is not supported when enable_thinking is true" in data.get("message", "")
 
     def test_history_with_tool_calls(self):
         """
@@ -262,9 +271,7 @@ class TestAdvancedFeatures:
         response = make_request(payload)
 
         # 核心验证：不能崩 (500)
-        assert (
-            response.status_code != 500
-        ), "Server returned 500 for history with tool calls"
+        assert response.status_code != 500, "Server returned 500 for history with tool calls"
         assert response.status_code == 200
 
     def test_r1_tool_call_format_wrapping(self):
@@ -285,18 +292,14 @@ class TestAdvancedFeatures:
                 "tool_choice": {
                     "type": "function",
                     "function": {"name": "get_current_weather"},
-                },  # 修正后的 tool_choice 格式
+                },
                 "tools": TOOL_VECTOR_WEATHER,
             },
         }
 
-        # 注意：CSV中提到的错误是 `tool_choice` 格式问题导致的 400 被包了一层 500
-        # 这里我们发送请求并检查状态码
         response = make_request(payload)
 
-        # 即使失败，也应该返回标准的 400 而不是 InternalError
         if response.status_code != 200:
             error_data = response.json()
-            # 确保不是 500 或者 InternalError
             assert response.status_code != 500
             assert error_data.get("code") != "InternalError"
