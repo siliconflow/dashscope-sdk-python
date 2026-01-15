@@ -1,4 +1,4 @@
-curl --location "http://localhost:8000/api/v1/services/aigc/text-generation/generation" \
+curl --location "http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-V3" \
 --header "x-api-key: $SILICONFLOW_API_KEY" \
 --header "Content-Type: application/json" \
 --header "X-DashScope-SSE: enable" \
@@ -14,6 +14,6 @@ curl --location "http://localhost:8000/api/v1/services/aigc/text-generation/gene
     },
     "parameters": {
         "result_format": "message",
-        "max_tokens": 1024
+        "max_tokens": "100.1"
     }
 }'
