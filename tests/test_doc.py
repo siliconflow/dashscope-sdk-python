@@ -174,5 +174,148 @@ class TestStrictErrorValidation:
         )
 
 
-if __name__ == "__main__":
-    pytest.main(["-v", __file__])
+class TestFunctionalFixes:
+    """
+    测试表格中提到的功能修复验证 (Verify Fixes) 和特定的字段格式检查
+    """
+
+    def test_r1_usage_structure_no_text_tokens(self):
+        """
+        表格行: .usage.output_tokens_details 该路径下不应该返回 text_tokens 字段
+        Model: pre-siliconflow/deepseek-r1
+        Check: usage.output_tokens_details 应该只包含 reasoning_tokens
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {"messages": [{"role": "user", "content": "你好"}]},
+            "parameters": {"max_tokens": 10} # 限制输出以加快测试
+        }
+        response = make_request(payload)
+
+        assert response.status_code == 200, f"Request failed with {response.status_code}"
+
+        # 解析 SSE 流或直接读取 JSON (假设是非流式或读取最后一块)
+        # 这里简化处理：如果是流式，我们需要解析最后一个包含 usage 的块
+        # 为了测试稳定性，建议在此处强制是非流式请求，或者手动解析SSE
+        # 这里演示解析 JSON Body (如果接口支持非流式返回) 或者解析 SSE
+
+        # 简单起见，读取整个流并查找 usage
+        content = response.text
+        assert '"text_tokens"' not in content, "Response output_tokens_details should NOT contain 'text_tokens'"
+        assert '"reasoning_tokens"' in content, "Response output_tokens_details MUST contain 'reasoning_tokens'"
+
+    def test_tool_choice_invalid_error_mapping(self):
+        """
+        表格行: Error code: 400，_sse_http_status": 500
+        描述: 传递了不符合协议的 tool_choice (传递了type但没有function定义，或格式错误)
+        Expected: 返回明确的 InternalError 且包含 upstream 的 400 信息
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {
+                "messages": [{"role": "user", "content": "What is the weather like in Boston?"}]
+            },
+            "parameters": {
+                "result_format": "message",
+                # 错误的 tool_choice 格式，导致上游报错
+                "tool_choice": {"type": "get_current_weather"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get current weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+        response = make_request(payload)
+        data = response.json()
+
+        expected_msg_snippet = "Input should be 'none', 'auto' or 'required'"
+
+        assert data.get("code") == "InternalError"
+        # 验证错误信息是否透传了上游的详细校验失败信息
+        assert expected_msg_snippet in data.get("message"), \
+            f"Expected error message to contain '{expected_msg_snippet}', got: {data.get('message')}"
+
+    def test_history_tool_call_fix(self):
+        """
+        表格行: 3.1和3.2 message中包含历史tool_call调用信息会报5xx -> 修复验证
+        Model: pre-siliconflow/deepseek-v3.2
+        Input: 包含 system, user, assistant(tool_calls), tool(result) 的完整历史
+        Expected: 200 OK (之前报 500)
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是一个智能助手。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "外部轴设置"
+                    },
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "arguments": "{\"input_text\": \"外部轴设置\"}",
+                                    "name": "KB20250625001"
+                                },
+                                "id": "call_6478091069c2448b83f38e",
+                                "type": "function"
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "界面用于用户进行快速配置。",
+                        "tool_call_id": "call_6478091069c2448b83f38e"
+                    }
+                ]
+            },
+            # 确保不开启思考，避免干扰测试 tool history 功能
+            "parameters": {"enable_thinking": False}
+        }
+
+        response = make_request(payload)
+        assert response.status_code == 200, f"Previously 500 error scenario failed. Got: {response.text}"
+
+    def test_prefix_completion_success(self):
+        """
+        表格行: 前缀续写，pre-siliconflow-deepseek-v3.2 报500 -> 修复验证
+        Model: pre-siliconflow/deepseek-v3.2
+        Scenario: Assistant 消息带 partial=True
+        Expected: 200 OK (只要不开启 enable_thinking)
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {
+                        "role": "assistant",
+                        "partial": True,
+                        "content": "你好，我是"
+                    }
+                ]
+            },
+            # 明确关闭 thinking 以测试单纯的前缀续写功能
+            "parameters": {"enable_thinking": False}
+        }
+
+        response = make_request(payload)
+        assert response.status_code == 200, f"Prefix completion failed with {response.status_code}. Body: {response.text}"
+
+        # 可选：验证返回内容确实是以前缀开始的续写
+        # context = response.text...
