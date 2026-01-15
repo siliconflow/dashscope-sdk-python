@@ -3,10 +3,13 @@ import json
 import time
 import uuid
 import logging
+import logging.config
+import sys
 import asyncio
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from contextvars import ContextVar
 
 import httpx
 import uvicorn
@@ -17,11 +20,62 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
-    datefmt="%H:%M:%S",
-)
+# Define context variable for request ID tracking
+request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
+
+class RequestIDFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = request_id_ctx.get()
+        return True
+
+# Structured logging configuration for production
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "request_id": {
+            "()": RequestIDFilter,
+        }
+    },
+    "formatters": {
+        "standard": {
+            # Format includes request_id for traceability
+            "format": "%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | [%(request_id)s] | %(message)s",
+            "datefmt": "%H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "level": "DEBUG",
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+            "filters": ["request_id"],
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "loggers": {
+        # Application logger
+        "DeepSeekProxy": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        # Capture uvicorn logs with consistent format
+        "uvicorn": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False
+        },
+        "uvicorn.access": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False
+        },
+    },
+}
+
+# Apply the logging configuration
+logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger("DeepSeekProxy")
 
 SILICON_FLOW_BASE_URL = os.getenv(
@@ -951,7 +1005,8 @@ async def lifespan(app: FastAPI):
 def _prepare_proxy_and_headers(
     request: Request, authorization: Optional[str]
 ) -> tuple[DeepSeekProxy, str]:
-    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    # Get the request ID from ContextVar (already set in middleware)
+    request_id = request_id_ctx.get()
     api_key = DUMMY_KEY
 
     x_api_key = request.headers.get("x-api-key")
@@ -1132,20 +1187,31 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
-        # Await the async increment
+        # 1. Try to get Trace ID from headers, or generate a new one
+        req_id = request.headers.get("x-request-id", request.headers.get("X-SiliconCloud-Trace-Id", str(uuid.uuid4())))
+
+        # 2. Set ContextVar for request ID tracking
+        token = request_id_ctx.set(req_id)
+
         await SERVER_STATE.increment_request()
         start_time = time.time()
+
         try:
             response = await call_next(request)
+
+            # 3. Add Trace ID to response headers for client troubleshooting
+            response.headers["X-Request-Id"] = req_id
             return response
         finally:
-            # Await the async decrement
             await SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
+
+            # Log slow requests (logger will automatically include req_id)
             if duration > 1000:
-                logger.warning(
-                    f"{request.method} {request.url.path} - SLOW {duration:.2f}ms"
-                )
+                logger.warning(f"{request.method} {request.url.path} - SLOW {duration:.2f}ms")
+
+            # 4. Clean up ContextVar to prevent contamination of other requests
+            request_id_ctx.reset(token)
 
     @app.get("/health_check")
     async def health_check():
