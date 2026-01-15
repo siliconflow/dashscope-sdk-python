@@ -31,17 +31,58 @@ SILICON_FLOW_BASE_URL = os.getenv(
 )
 _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
-MODEL_MAPPING = {
-    "deepseek-v3": "deepseek-ai/DeepSeek-V3",
-    "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
-    "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
-    "deepseek-r1": "deepseek-ai/DeepSeek-R1",
-    "default": "deepseek-ai/DeepSeek-V3",
-    "pre-siliconflow/deepseek-v3": "deepseek-ai/DeepSeek-V3",
-    "pre-siliconflow/deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
-    "pre-siliconflow/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
-    "pre-siliconflow/deepseek-r1": "deepseek-ai/DeepSeek-R1",
-}
+# --- Model Abstraction & Resolution ---
+from dataclasses import dataclass
+
+@dataclass
+class ModelSpec:
+    real_model_name: str       # 发送给上游 SiliconFlow 的真实模型名
+    is_reasoning: bool = False # 是否为推理模型 (R1系列)
+    supports_thinking: bool = False # 是否支持显式开启 thinking 参数 (V3通常不需要，R1自动开启)
+
+class ModelResolver:
+    """
+    模型解析器：负责把乱七八糟的模型路径解析成标准的能力配置
+    """
+    def __init__(self):
+        # 基础映射表 (保留旧逻辑兼容)
+        self._exact_map = {
+            "deepseek-v3": "deepseek-ai/DeepSeek-V3",
+            "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
+            "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
+            "deepseek-r1": "deepseek-ai/DeepSeek-R1",
+            "default": "deepseek-ai/DeepSeek-V3",
+            "pre-siliconflow/deepseek-v3": "deepseek-ai/DeepSeek-V3",
+            "pre-siliconflow/deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
+            "pre-siliconflow/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
+            "pre-siliconflow/deepseek-r1": "deepseek-ai/DeepSeek-R1",
+        }
+
+    def resolve(self, input_model: str) -> ModelSpec:
+        # 1. 预处理：去除多余的前缀/路径，标准化
+        clean_name = input_model.strip()
+
+        # 2. 识别核心特征 (基于子字符串的模糊匹配，比精确匹配更灵活)
+        lower_name = clean_name.lower()
+
+        is_r1 = "deepseek-r1" in lower_name
+
+        # SiliconFlow 的真实模型名通常就是传入的 path，或者需要做映射
+        # 如果传入的是简写，查表；如果是全路径，直接用
+        upstream_name = self._exact_map.get(lower_name, clean_name)
+
+        return ModelSpec(
+            real_model_name=upstream_name,
+            is_reasoning=is_r1,
+            # R1 自身就是推理模型，通常 API 不接受 enable_thinking 参数或者行为不同
+            # V3 如果未来支持 thinking，可以在这里扩展逻辑
+            supports_thinking=not is_r1
+        )
+
+# 全局单例
+model_resolver = ModelResolver()
+
+MODEL_MAPPING = model_resolver._exact_map
 
 DUMMY_KEY = "dummy-key"
 MAX_NUM_MSG_CURL_DUMP = 5
@@ -166,6 +207,7 @@ class DeepSeekProxy:
             **kv,
         )
 
+    # [Deprecated] Use model_resolver.resolve() instead
     def _get_mapped_model(self, request_model: str) -> str:
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
@@ -210,8 +252,11 @@ class DeepSeekProxy:
         force_stream: bool = False,
         skip_model_exist_check: bool = False,
     ):
-        # Model existence check
-        if not skip_model_exist_check and req_data.model not in MODEL_MAPPING:
+        # --- 1. 获取模型能力配置 ---
+        model_spec = model_resolver.resolve(req_data.model)
+
+        # Model existence check (保留基础校验)
+        if not skip_model_exist_check and req_data.model not in MODEL_MAPPING and not model_spec.real_model_name:
             return JSONResponse(
                 status_code=400,
                 content={
@@ -403,8 +448,10 @@ class DeepSeekProxy:
                 },
             )
 
-        is_r1 = "deepseek-r1" in req_data.model or params.enable_thinking
-        if is_r1 and params.tool_choice and isinstance(params.tool_choice, dict):
+        # --- 2. 校验逻辑 (利用 flags 而不是字符串匹配) ---
+        # 例如：R1 模型特判逻辑
+        is_r1_logic = model_spec.is_reasoning or params.enable_thinking
+        if is_r1_logic and params.tool_choice and isinstance(params.tool_choice, dict):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -413,7 +460,7 @@ class DeepSeekProxy:
                 },
             )
 
-        if "deepseek-r1" in req_data.model and params.enable_thinking:
+        if model_spec.is_reasoning and params.enable_thinking:
             return JSONResponse(
                 status_code=400,
                 content={
@@ -441,7 +488,7 @@ class DeepSeekProxy:
         proxy_stop_list = list(set(proxy_stop_list))
 
         # --- Request Parameters Assembly ---
-        target_model = self._get_mapped_model(req_data.model)
+        target_model = model_spec.real_model_name
         messages = self._convert_input_to_messages(req_data.input)
 
         if params.enable_thinking:
@@ -571,7 +618,6 @@ class DeepSeekProxy:
 
         # --- Execution ---
         try:
-            is_r1_model = "deepseek-r1" in req_data.model
             if openai_params["stream"]:
                 raw_resp = await self.client.chat.completions.with_raw_response.create(
                     **openai_params
@@ -586,7 +632,7 @@ class DeepSeekProxy:
                         trace_id,
                         is_incremental=params.incremental_output,
                         stop_sequences=proxy_stop_list,
-                        is_r1_model=is_r1_model,
+                        is_r1_model=model_spec.is_reasoning,
                     ),
                     media_type="text/event-stream",
                     headers={"X-SiliconCloud-Trace-Id": trace_id},
@@ -602,7 +648,7 @@ class DeepSeekProxy:
                     raw_resp.parse(),
                     trace_id,
                     stop_sequences=proxy_stop_list,
-                    is_r1_model=is_r1_model,
+                    is_r1_model=model_spec.is_reasoning,
                 )
 
         except APIError as e:
