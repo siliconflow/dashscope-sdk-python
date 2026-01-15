@@ -35,7 +35,6 @@ _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 class ModelSpec:
     real_model_name: str
     is_reasoning: bool = False
-    supports_thinking: bool = False
 
 
 class ModelResolver:
@@ -61,7 +60,6 @@ class ModelResolver:
         return ModelSpec(
             real_model_name=upstream_name,
             is_reasoning=is_r1,
-            supports_thinking=not is_r1,
         )
 
 
