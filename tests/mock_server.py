@@ -37,6 +37,10 @@ MODEL_MAPPING = {
     "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",
     "default": "deepseek-ai/DeepSeek-V3",
+    "pre-siliconflow/deepseek-v3": "deepseek-ai/DeepSeek-V3",
+    "pre-siliconflow/deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
+    "pre-siliconflow/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
+    "pre-siliconflow/deepseek-r1": "deepseek-ai/DeepSeek-R1",
 }
 
 DUMMY_KEY = "dummy-key"
@@ -165,10 +169,11 @@ class DeepSeekProxy:
     def _get_mapped_model(self, request_model: str) -> str:
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
-    def _convert_input_to_messages(self, input_data: InputData) -> List[Dict[str, str]]:
+    def _convert_input_to_messages(
+        self, input_data: InputData
+    ) -> List[Dict[str, Any]]:
         if input_data.messages:
-            return [m.model_dump() for m in input_data.messages]
-
+            return [m.model_dump(exclude_none=True) for m in input_data.messages]
         messages = []
         if input_data.history:
             for item in input_data.history:
@@ -284,6 +289,28 @@ class DeepSeekProxy:
                     },
                 )
 
+        # Top P check
+        if params.top_p is not None:
+            if params.top_p <= 0 or params.top_p > 1.0:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": f"<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0], but got {params.top_p}",
+                    },
+                )
+
+        # Temperature check
+        if params.temperature is not None:
+            if params.temperature < 0 or params.temperature > 2:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": f"<400> InternalError.Algo.InvalidParameter: Temperature should be in [0, 2], but got {params.temperature}",
+                    },
+                )
+
         # Thinking Budget check
         if params.thinking_budget is not None:
             if params.thinking_budget <= 0:
@@ -387,6 +414,26 @@ class DeepSeekProxy:
                     "message": "DeepSeek R1 does not support specific tool_choice binding (dict) while thinking logic is active.",
                 },
             )
+
+        if "deepseek-r1" in req_data.model and params.enable_thinking:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "InvalidParameter",
+                    "message": "Value error, current model does not support parameter `enable_thinking`.",
+                },
+            )
+
+        if params.enable_thinking:
+            for msg in messages:
+                if msg.get("partial"):
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "code": "InvalidParameter",
+                            "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
+                        },
+                    )
 
         # Stop parameter extraction
         proxy_stop_list: List[str] = []
@@ -526,6 +573,7 @@ class DeepSeekProxy:
 
         # --- Execution ---
         try:
+            is_r1_model = "deepseek-r1" in req_data.model
             if openai_params["stream"]:
                 raw_resp = await self.client.chat.completions.with_raw_response.create(
                     **openai_params
@@ -540,6 +588,7 @@ class DeepSeekProxy:
                         trace_id,
                         is_incremental=params.incremental_output,
                         stop_sequences=proxy_stop_list,
+                        is_r1_model=is_r1_model,
                     ),
                     media_type="text/event-stream",
                     headers={"X-SiliconCloud-Trace-Id": trace_id},
@@ -552,7 +601,10 @@ class DeepSeekProxy:
                     "X-SiliconCloud-Trace-Id", initial_request_id
                 )
                 return self._format_unary_response(
-                    raw_resp.parse(), trace_id, stop_sequences=proxy_stop_list
+                    raw_resp.parse(),
+                    trace_id,
+                    stop_sequences=proxy_stop_list,
+                    is_r1_model=is_r1_model,
                 )
 
         except APIError as e:
@@ -575,7 +627,12 @@ class DeepSeekProxy:
             )
 
     async def _stream_generator(
-        self, stream, request_id: str, is_incremental: bool, stop_sequences: List[str]
+        self,
+        stream,
+        request_id: str,
+        is_incremental: bool,
+        stop_sequences: List[str],
+        is_r1_model: bool = False,
     ) -> AsyncGenerator[str, None]:
         accumulated_usage = {
             "total_tokens": 0,
@@ -611,6 +668,9 @@ class DeepSeekProxy:
                         accumulated_usage["output_tokens"]
                         - accumulated_usage["output_tokens_details"]["reasoning_tokens"]
                     )
+
+            if is_r1_model:
+                accumulated_usage["output_tokens_details"].pop("text_tokens", None)
 
             delta = chunk.choices[0].delta if chunk.choices else None
 
@@ -827,7 +887,11 @@ class DeepSeekProxy:
         return f"data: {json.dumps(response_body, ensure_ascii=False)}\n\n"
 
     def _format_unary_response(
-        self, completion, request_id: str, stop_sequences: List[str]
+        self,
+        completion,
+        request_id: str,
+        stop_sequences: List[str],
+        is_r1_model: bool = False,
     ):
         choice = completion.choices[0]
         msg = choice.message
@@ -860,6 +924,9 @@ class DeepSeekProxy:
                 usage_data["output_tokens"]
                 - usage_data["output_tokens_details"]["reasoning_tokens"]
             )
+
+        if is_r1_model:
+            usage_data["output_tokens_details"].pop("text_tokens", None)
 
         message_body = {
             "role": msg.role,
