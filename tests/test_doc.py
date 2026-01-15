@@ -301,7 +301,7 @@ class TestFunctionalFixes:
         print(f"[DEBUG] Finish Reason: {final_finish_reason}")
 
         # 1. 验证 reasoning 内容回来了 (Think 过程不应为空)
-        assert len(collected_reasoning) > 10, "Expected significant reasoning content from R1 model."
+        assert len(collected_reasoning) > 10, f"Expected significant reasoning content from R1 model. {collected_reasoning}"
 
         # 2. 验证 Stop 生效 (Content 应该包含 'The sun is like a ' 但不包含 'Banana')
         assert "The sun" in collected_content
