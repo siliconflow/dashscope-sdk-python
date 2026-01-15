@@ -1265,10 +1265,11 @@ def create_app() -> FastAPI:
 
         try:
             payload = await request.json()
-            payload["model"] = model_path
-            body = GenerationRequest(**payload)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid Request: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+        payload["model"] = model_path
+        body = GenerationRequest(**payload)
 
         accept_header = request.headers.get("accept", "")
         dashscope_sse = request.headers.get("x-dashscope-sse", "").lower()
