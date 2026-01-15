@@ -16,7 +16,7 @@ HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
     "Accept": "text/event-stream",
-    "X-DashScope-SSE": "enable" # 模拟 DashScope 协议头
+    "X-DashScope-SSE": "enable",  # 模拟 DashScope 协议头
 }
 
 # --- TOOL DEFINITIONS ---
@@ -43,13 +43,16 @@ TOOL_VECTOR_WEATHER = [
 
 # --- HELPERS ---
 
+
 @dataclass
 class SSEFrame:
     """Formal representation of a Server-Sent Event frame for validation."""
+
     id: str
     output: Dict[str, Any]
     usage: Dict[str, Any]
     request_id: str
+
 
 def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, None]:
     """Parses the raw SSE stream."""
@@ -61,7 +64,9 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                 try:
                     data = json.loads(json_str)
                     yield SSEFrame(
-                        id=data.get("output", {}).get("choices", [{}])[0].get("id", "unknown"),
+                        id=data.get("output", {})
+                        .get("choices", [{}])[0]
+                        .get("id", "unknown"),
                         output=data.get("output", {}),
                         usage=data.get("usage", {}),
                         request_id=data.get("request_id", ""),
@@ -69,11 +74,14 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                 except json.JSONDecodeError:
                     continue
 
+
 def make_request(payload):
     """Helper to send POST request."""
     return requests.post(GATEWAY_URL, headers=HEADERS, json=payload, stream=True)
 
+
 # --- TEST SUITE ---
+
 
 class TestParameterValidation:
     """
@@ -88,16 +96,20 @@ class TestParameterValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": "a"} # Invalid type
+            "parameters": {"top_p": "a"},  # Invalid type
         }
         response = make_request(payload)
 
         # 验证状态码不应为 500
-        assert response.status_code != 500, "Should not return 500 for invalid parameter type"
+        assert (
+            response.status_code != 500
+        ), "Should not return 500 for invalid parameter type"
         assert response.status_code == 400
 
         data = response.json()
-        assert "InvalidParameter" in data.get("code", "") or "InvalidParameter" in data.get("message", "")
+        assert "InvalidParameter" in data.get(
+            "code", ""
+        ) or "InvalidParameter" in data.get("message", "")
 
     @pytest.mark.parametrize("top_p_value", [0, 0.0])
     def test_invalid_parameter_range_top_p(self, top_p_value):
@@ -108,7 +120,7 @@ class TestParameterValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": top_p_value}
+            "parameters": {"top_p": top_p_value},
         }
         response = make_request(payload)
 
@@ -124,7 +136,7 @@ class TestParameterValidation:
         payload = {
             "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"temperature": 2.1}
+            "parameters": {"temperature": 2.1},
         }
         response = make_request(payload)
 
@@ -146,7 +158,7 @@ class TestDeepSeekR1Specifics:
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {}
+            "parameters": {},
         }
         response = make_request(payload)
         assert response.status_code == 200
@@ -160,7 +172,9 @@ class TestDeepSeekR1Specifics:
         # 验证 output_tokens_details 存在
         assert output_details, "output_tokens_details missing"
         # 验证不包含 text_tokens (根据表格描述这是预期行为)
-        assert "text_tokens" not in output_details, "R1 usage should not contain text_tokens"
+        assert (
+            "text_tokens" not in output_details
+        ), "R1 usage should not contain text_tokens"
         # 验证包含 reasoning_tokens
         assert "reasoning_tokens" in output_details
 
@@ -172,7 +186,7 @@ class TestDeepSeekR1Specifics:
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"enable_thinking": True}
+            "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
 
@@ -196,18 +210,18 @@ class TestAdvancedFeatures:
             "input": {
                 "messages": [
                     {"role": "user", "content": "你好"},
-                    {"role": "assistant", "partial": True, "content": "你好，我是"}
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
                 ]
             },
-            "parameters": {
-                "enable_thinking": True
-            }
+            "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
 
         assert response.status_code == 400
         data = response.json()
-        assert "Partial mode is not supported when enable_thinking is true" in data.get("message", "")
+        assert "Partial mode is not supported when enable_thinking is true" in data.get(
+            "message", ""
+        )
 
     def test_history_with_tool_calls(self):
         """
@@ -220,40 +234,37 @@ class TestAdvancedFeatures:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一个为智能助手。请使用简洁、自然、适合朗读的中文回答"
+                        "content": "你是一个为智能助手。请使用简洁、自然、适合朗读的中文回答",
                     },
-                    {
-                        "role": "user",
-                        "content": "外部轴设置"
-                    },
+                    {"role": "user", "content": "外部轴设置"},
                     {
                         "role": "assistant",
                         "tool_calls": [
                             {
                                 "function": {
-                                    "arguments": "{\"input_text\": \"外部轴设置\"}",
-                                    "name": "KB20250625001"
+                                    "arguments": '{"input_text": "外部轴设置"}',
+                                    "name": "KB20250625001",
                                 },
                                 "id": "call_6478091069c2448b83f38e",
-                                "type": "function"
+                                "type": "function",
                             }
-                        ]
+                        ],
                     },
                     {
                         "role": "tool",
                         "content": "界面用于用户进行快速配置。",
-                        "tool_call_id": "call_6478091069c2448b83f38e"
-                    }
+                        "tool_call_id": "call_6478091069c2448b83f38e",
+                    },
                 ]
             },
-            "parameters": {
-                "enable_thinking": True
-            }
+            "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
 
         # 核心验证：不能崩 (500)
-        assert response.status_code != 500, "Server returned 500 for history with tool calls"
+        assert (
+            response.status_code != 500
+        ), "Server returned 500 for history with tool calls"
         assert response.status_code == 200
 
     def test_r1_tool_call_format_wrapping(self):
@@ -265,13 +276,18 @@ class TestAdvancedFeatures:
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
             "input": {
-                "messages": [{"role": "user", "content": "What is the weather like in Boston?"}]
+                "messages": [
+                    {"role": "user", "content": "What is the weather like in Boston?"}
+                ]
             },
             "parameters": {
                 "result_format": "message",
-                "tool_choice": {"type": "function", "function": {"name": "get_current_weather"}}, # 修正后的 tool_choice 格式
-                "tools": TOOL_VECTOR_WEATHER
-            }
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_current_weather"},
+                },  # 修正后的 tool_choice 格式
+                "tools": TOOL_VECTOR_WEATHER,
+            },
         }
 
         # 注意：CSV中提到的错误是 `tool_choice` 格式问题导致的 400 被包了一层 500

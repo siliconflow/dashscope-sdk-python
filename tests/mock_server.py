@@ -169,9 +169,7 @@ class DeepSeekProxy:
     def _get_mapped_model(self, request_model: str) -> str:
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
-    def _convert_input_to_messages(
-        self, input_data: InputData
-    ) -> List[Dict[str, Any]]:
+    def _convert_input_to_messages(self, input_data: InputData) -> List[Dict[str, Any]]:
         if input_data.messages:
             return [m.model_dump(exclude_none=True) for m in input_data.messages]
         messages = []
