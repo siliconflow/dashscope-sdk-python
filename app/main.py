@@ -1227,10 +1227,8 @@ def create_app() -> FastAPI:
     return app
 
 
-def run_server(host="0.0.0.0", port=8000):
-    app = create_app()
-    uvicorn.run(app, host=host, port=port)
-
+app = create_app()
 
 if __name__ == "__main__":
-    run_server()
+    # 本地直接运行 python main.py 时的入口
+    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=True)
