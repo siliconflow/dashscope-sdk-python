@@ -34,9 +34,11 @@ TOOL_VECTOR_WEATHER = [
 
 # --- 2. CORE UTILITIES & DATA STRUCTURES ---
 
+
 @dataclass
 class SSEFrame:
     """Formal representation of a Server-Sent Event frame for validation."""
+
     id: str
     output: Dict[str, Any]
     usage: Dict[str, Any]
@@ -58,6 +60,7 @@ class SSEFrame:
             return ""
         return choices[0].get("message", {}).get("reasoning_content", "")
 
+
 def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, None]:
     """
     Parses the raw SSE stream, enforcing protocol strictness.
@@ -74,7 +77,9 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                     usage_data = data.get("usage", {})
 
                     yield SSEFrame(
-                        id=data.get("output", {}).get("choices", [{}])[0].get("id", "unknown"),
+                        id=data.get("output", {})
+                        .get("choices", [{}])[0]
+                        .get("id", "unknown"),
                         output=data.get("output", {}),
                         usage=usage_data,
                         request_id=data.get("request_id", ""),
@@ -82,7 +87,9 @@ def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, N
                 except json.JSONDecodeError:
                     continue
 
+
 # --- SUITE A: INVARIANT & PREDICATE VERIFICATION ---
+
 
 def test_invariant_format_constraint():
     """
@@ -104,6 +111,7 @@ def test_invariant_format_constraint():
     assert "code" in error_data
     assert "result_format" in str(error_data).lower()
 
+
 def test_invariant_r1_orthogonality():
     """
     Predicate B: DeepSeek R1 'Thinking Mode' is orthogonal to 'Forced Tool Choice (Dict)'.
@@ -111,7 +119,9 @@ def test_invariant_r1_orthogonality():
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "deepseek-r1",
-        "input": {"messages": [{"role": "user", "content": "Analyze the weather logic."}]},
+        "input": {
+            "messages": [{"role": "user", "content": "Analyze the weather logic."}]
+        },
         "parameters": {
             "enable_thinking": True,
             "tools": TOOL_VECTOR_WEATHER,
@@ -126,7 +136,9 @@ def test_invariant_r1_orthogonality():
     assert response.status_code == 400
     assert "InvalidParameter" in response.json().get("code", "")
 
+
 # --- SUITE B: PROTOCOL ISOMORPHISM (SSE TELEMETRY) ---
+
 
 def test_telemetry_continuity_sse():
     """
@@ -158,7 +170,9 @@ def test_telemetry_continuity_sse():
 
     assert frame_count > 0
 
+
 # --- SUITE C: TOOL INVOCATION & CONFIGURATION TESTS ---
+
 
 def test_unary_tool_invocation_structure():
     """
@@ -187,6 +201,7 @@ def test_unary_tool_invocation_structure():
     assert "message" in choice
     assert "usage" in data
 
+
 def test_tool_choice_none_suppression():
     """
     Validates that tool_choice='none' is accepted and processes without error.
@@ -207,7 +222,9 @@ def test_tool_choice_none_suppression():
     data = response.json()
     assert data["output"]["choices"][0]["finish_reason"] is not None
 
+
 # --- SUITE D: INCREMENTAL OUTPUT BEHAVIOR ---
+
 
 def assert_stream_accumulation(frames: List[SSEFrame], check_reasoning: bool = False):
     """
@@ -216,7 +233,9 @@ def assert_stream_accumulation(frames: List[SSEFrame], check_reasoning: bool = F
     """
     previous_content = ""
     for i, frame in enumerate(frames):
-        current_content = frame.reasoning_content if check_reasoning else frame.text_content
+        current_content = (
+            frame.reasoning_content if check_reasoning else frame.text_content
+        )
 
         # Skip empty frames
         if not current_content and not previous_content:
@@ -229,6 +248,7 @@ def assert_stream_accumulation(frames: List[SSEFrame], check_reasoning: bool = F
         )
         previous_content = current_content
 
+
 def assert_stream_deltas(frames: List[SSEFrame], check_reasoning: bool = False):
     """
     Validates 'Delta' behavior (incremental_output=True).
@@ -238,20 +258,27 @@ def assert_stream_deltas(frames: List[SSEFrame], check_reasoning: bool = False):
     previous_content = ""
 
     for i, frame in enumerate(frames):
-        current_content = frame.reasoning_content if check_reasoning else frame.text_content
+        current_content = (
+            frame.reasoning_content if check_reasoning else frame.text_content
+        )
         if not current_content:
             continue
 
         # Heuristic: If content strictly grows and contains previous, it's likely accumulation
-        if (previous_content and
-            current_content.startswith(previous_content) and
-            len(current_content) > len(previous_content)):
+        if (
+            previous_content
+            and current_content.startswith(previous_content)
+            and len(current_content) > len(previous_content)
+        ):
             accumulation_detected = True
             break
 
         previous_content = current_content
 
-    assert not accumulation_detected, "Stream appears to be accumulating full text, expected Deltas."
+    assert (
+        not accumulation_detected
+    ), "Stream appears to be accumulating full text, expected Deltas."
+
 
 def test_incremental_output_false_explicit():
     """
@@ -278,6 +305,7 @@ def test_incremental_output_false_explicit():
     assert len(frames) > 0
     assert_stream_accumulation(frames, check_reasoning=True)
 
+
 def test_incremental_output_default_behavior():
     """
     Case 2: incremental_output param is MISSING.
@@ -302,6 +330,7 @@ def test_incremental_output_default_behavior():
     frames = list(parse_sse_stream(response))
     assert len(frames) > 0
     assert_stream_accumulation(frames, check_reasoning=True)
+
 
 def test_incremental_output_true_contrast():
     """

@@ -25,7 +25,7 @@ from app.config import (
     DUMMY_KEY,
     MAX_NUM_MSG_CURL_DUMP,
     TIMEOUT_CONFIG,
-    SERVER_CONFIG
+    SERVER_CONFIG,
 )
 
 # Define context variable for request ID tracking
@@ -1125,7 +1125,10 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
         # 1. Try to get Trace ID from headers, or generate a new one
-        req_id = request.headers.get("x-request-id", request.headers.get("X-SiliconCloud-Trace-Id", str(uuid.uuid4())))
+        req_id = request.headers.get(
+            "x-request-id",
+            request.headers.get("X-SiliconCloud-Trace-Id", str(uuid.uuid4())),
+        )
 
         # 2. Set ContextVar for request ID tracking
         token = request_id_ctx.set(req_id)
@@ -1145,7 +1148,9 @@ def create_app() -> FastAPI:
 
             # Log slow requests (logger will automatically include req_id)
             if duration > 1000:
-                logger.warning(f"{request.method} {request.url.path} - SLOW {duration:.2f}ms")
+                logger.warning(
+                    f"{request.method} {request.url.path} - SLOW {duration:.2f}ms"
+                )
 
             # 4. Clean up ContextVar to prevent contamination of other requests
             request_id_ctx.reset(token)

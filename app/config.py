@@ -29,15 +29,12 @@ TIMEOUT_CONFIG = {
     "connect": 10.0,
     "read": 7200.0,  # 2 hours
     "write": 600.0,
-    "pool": 10.0
+    "pool": 10.0,
 }
 
 # Server configuration
-SERVER_CONFIG = {
-    "host": "0.0.0.0",
-    "port": 8000,
-    "access_log": True
-}
+SERVER_CONFIG = {"host": "0.0.0.0", "port": 8000, "access_log": True}
+
 
 # Request ID filter for logging
 class RequestIDFilter(logging.Filter):
@@ -51,6 +48,7 @@ class RequestIDFilter(logging.Filter):
         else:
             record.request_id = "-"
         return True
+
 
 # Logging configuration - will be configured after request_id_ctx is available
 def get_logging_config(request_id_ctx=None):
@@ -84,15 +82,11 @@ def get_logging_config(request_id_ctx=None):
                 "level": "DEBUG",
                 "propagate": False,
             },
-            "uvicorn": {
-                "handlers": ["console"],
-                "level": "INFO",
-                "propagate": False
-            },
+            "uvicorn": {"handlers": ["console"], "level": "INFO", "propagate": False},
             "uvicorn.access": {
                 "handlers": ["console"],
                 "level": "INFO",
-                "propagate": False
+                "propagate": False,
             },
         },
     }
