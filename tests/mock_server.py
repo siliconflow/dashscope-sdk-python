@@ -7,6 +7,7 @@ import threading
 import multiprocessing
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 import uvicorn
@@ -17,7 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
-# --- Logging Configuration ---
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s.%(msecs)03d | %(levelname)s | %(process)d | %(message)s",
@@ -25,32 +25,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DeepSeekProxy")
 
-# --- Constants & Environment Variables ---
 SILICON_FLOW_BASE_URL = os.getenv(
     "SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1"
 )
 _MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
-# --- Model Abstraction & Resolution ---
-from dataclasses import dataclass
-
 
 @dataclass
 class ModelSpec:
-    real_model_name: str  # 发送给上游 SiliconFlow 的真实模型名
-    is_reasoning: bool = False  # 是否为推理模型 (R1系列)
-    supports_thinking: bool = (
-        False  # 是否支持显式开启 thinking 参数 (V3通常不需要，R1自动开启)
-    )
+    real_model_name: str
+    is_reasoning: bool = False
+    supports_thinking: bool = False
 
 
 class ModelResolver:
-    """
-    模型解析器：负责把乱七八糟的模型路径解析成标准的能力配置
-    """
-
     def __init__(self):
-        # 基础映射表 (保留旧逻辑兼容)
         self._exact_map = {
             "deepseek-v3": "deepseek-ai/DeepSeek-V3",
             "deepseek-v3.1": "deepseek-ai/DeepSeek-V3.1",
@@ -64,37 +53,24 @@ class ModelResolver:
         }
 
     def resolve(self, input_model: str) -> ModelSpec:
-        # 1. 预处理：去除多余的前缀/路径，标准化
         clean_name = input_model.strip()
-
-        # 2. 识别核心特征 (基于子字符串的模糊匹配，比精确匹配更灵活)
         lower_name = clean_name.lower()
-
         is_r1 = "deepseek-r1" in lower_name
-
-        # SiliconFlow 的真实模型名通常就是传入的 path，或者需要做映射
-        # 如果传入的是简写，查表；如果是全路径，直接用
         upstream_name = self._exact_map.get(lower_name, clean_name)
 
         return ModelSpec(
             real_model_name=upstream_name,
             is_reasoning=is_r1,
-            # R1 自身就是推理模型，通常 API 不接受 enable_thinking 参数或者行为不同
-            # V3 如果未来支持 thinking，可以在这里扩展逻辑
             supports_thinking=not is_r1,
         )
 
 
-# 全局单例
 model_resolver = ModelResolver()
-
 MODEL_MAPPING = model_resolver._exact_map
-
 DUMMY_KEY = "dummy-key"
 MAX_NUM_MSG_CURL_DUMP = 5
 
 
-# --- Server State Management ---
 class ServerState:
     _instance = None
 
@@ -137,7 +113,6 @@ class ServerState:
 SERVER_STATE = ServerState.get_instance()
 
 
-# --- Pydantic Models ---
 class Message(BaseModel):
     role: str
     content: Optional[Union[str, List[Dict[str, Any]]]] = ""
@@ -169,20 +144,15 @@ class Parameters(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     presence_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.0
-
     prefix: Optional[str] = None
-
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
-
     stop: Optional[Union[str, List[Union[str, int]]]] = None
-
     stop_words: Optional[List[Dict[str, Any]]] = None
     enable_thinking: bool = False
     thinking_budget: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
-
     response_format: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
@@ -194,7 +164,6 @@ class GenerationRequest(BaseModel):
     parameters: Optional[Parameters] = Field(default_factory=Parameters)
 
 
-# --- DeepSeek Proxy Logic ---
 class DeepSeekProxy:
     def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
         if extra_headers is None:
@@ -213,7 +182,6 @@ class DeepSeekProxy:
             **kv,
         )
 
-    # [Deprecated] Use model_resolver.resolve() instead
     def _get_mapped_model(self, request_model: str) -> str:
         return MODEL_MAPPING.get(request_model, MODEL_MAPPING["default"])
 
@@ -235,10 +203,6 @@ class DeepSeekProxy:
     def _find_earliest_stop(
         self, text: str, stop_sequences: List[str]
     ) -> Tuple[int, Optional[str]]:
-        """
-        Helper to find the earliest occurrence of any stop sequence in text.
-        Returns (index, stop_sequence_found). If not found, index is -1.
-        """
         min_index = -1
         found_stop = None
         for stop_seq in stop_sequences:
@@ -258,10 +222,8 @@ class DeepSeekProxy:
         force_stream: bool = False,
         skip_model_exist_check: bool = False,
     ):
-        # --- 1. 获取模型能力配置 ---
         model_spec = model_resolver.resolve(req_data.model)
 
-        # Model existence check (保留基础校验)
         if (
             not skip_model_exist_check
             and req_data.model not in MODEL_MAPPING
@@ -275,7 +237,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # Input content validation
         has_input = req_data.input is not None
         has_content = False
         if has_input:
@@ -311,7 +272,6 @@ class DeepSeekProxy:
 
         params = req_data.parameters
 
-        # Logprobs check
         if params.logprobs:
             return JSONResponse(
                 status_code=400,
@@ -321,7 +281,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # Max Tokens check
         if params.max_tokens is not None and params.max_tokens < 1:
             return JSONResponse(
                 status_code=400,
@@ -331,7 +290,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # N (Completions) check
         if params.n is not None:
             if not (1 <= params.n <= 4):
                 return JSONResponse(
@@ -342,7 +300,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Top P check
         if params.top_p is not None:
             if params.top_p <= 0 or params.top_p > 1.0:
                 return JSONResponse(
@@ -353,7 +310,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Temperature check
         if params.temperature is not None:
             if params.temperature < 0 or params.temperature > 2:
                 return JSONResponse(
@@ -364,7 +320,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Thinking Budget check
         if params.thinking_budget is not None:
             if params.thinking_budget <= 0:
                 return JSONResponse(
@@ -375,7 +330,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Seed check
         if params.seed is not None:
             if not (0 <= params.seed <= 9223372036854775807):
                 return JSONResponse(
@@ -386,7 +340,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Response Format check
         if params.response_format:
             rf_type = params.response_format.get("type")
             if rf_type and rf_type not in ["json_object", "text"]:
@@ -407,7 +360,6 @@ class DeepSeekProxy:
                     },
                 )
 
-        # Tool Calls chain logic validation
         if req_data.input.messages:
             msgs = req_data.input.messages
             for idx, msg in enumerate(msgs):
@@ -458,8 +410,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # --- 2. 校验逻辑 (利用 flags 而不是字符串匹配) ---
-        # 例如：R1 模型特判逻辑
         is_r1_logic = model_spec.is_reasoning or params.enable_thinking
         if is_r1_logic and params.tool_choice and isinstance(params.tool_choice, dict):
             return JSONResponse(
@@ -479,7 +429,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # Stop parameter extraction
         proxy_stop_list: List[str] = []
         if params.stop:
             if isinstance(params.stop, str):
@@ -494,10 +443,8 @@ class DeepSeekProxy:
                 if sw.get("mode", "exclude") == "exclude" and "stop_str" in sw:
                     proxy_stop_list.append(sw["stop_str"])
 
-        # Deduplicate
         proxy_stop_list = list(set(proxy_stop_list))
 
-        # --- Request Parameters Assembly ---
         target_model = model_spec.real_model_name
         messages = self._convert_input_to_messages(req_data.input)
 
@@ -522,7 +469,6 @@ class DeepSeekProxy:
             "temperature": params.temperature,
             "top_p": params.top_p,
             "stream": should_stream,
-            # Note: "stop" is intentionally omitted here, handled by proxy
         }
 
         if params.response_format:
@@ -596,7 +542,6 @@ class DeepSeekProxy:
         if params.seed:
             openai_params["seed"] = params.seed
 
-        # --- Debug Logging ---
         logger.debug(f"[Stop Sequences] Proxy handling stop for: {proxy_stop_list}")
 
         curl_headers = [
@@ -626,7 +571,6 @@ class DeepSeekProxy:
         )
         logger.debug(f"[Curl Command]\n{curl_cmd}")
 
-        # --- Execution ---
         try:
             if openai_params["stream"]:
                 raw_resp = await self.client.chat.completions.with_raw_response.create(
@@ -666,19 +610,15 @@ class DeepSeekProxy:
                 f"[request id: {initial_request_id}] Upstream API Error: {str(e)}"
             )
 
-            # Default error code
             error_code = "InternalError"
 
-            # Handle HTTP 400 errors (typically parameter errors or model not found)
             if e.status_code == 400:
                 error_code = "InvalidParameter"
-                # Check if the error message contains model not found indication
                 error_msg = str(e)
                 if (
                     "Model does not exist" in error_msg
                     or "model not found" in error_msg.lower()
                 ):
-                    # Return the exact message expected by tests
                     return JSONResponse(
                         status_code=400,
                         content={
@@ -722,7 +662,6 @@ class DeepSeekProxy:
         full_reasoning = ""
         accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
-        # --- Stop Logic Buffer State ---
         content_buffer = ""
         max_stop_len = max([len(s) for s in stop_sequences]) if stop_sequences else 0
         stop_triggered = False
@@ -750,13 +689,11 @@ class DeepSeekProxy:
 
             delta = chunk.choices[0].delta if chunk.choices else None
 
-            # --- Reasoning Content Handling ---
             delta_reasoning = (
                 (getattr(delta, "reasoning_content", "") or "") if delta else ""
             )
             if delta_reasoning:
                 full_reasoning += delta_reasoning
-                # Output reasoning content regardless of incremental mode
                 if is_incremental:
                     yield self._build_stream_response(
                         content="",
@@ -767,7 +704,6 @@ class DeepSeekProxy:
                         request_id=request_id,
                     )
                 else:
-                    # In non-incremental mode, output accumulated reasoning and text
                     yield self._build_stream_response(
                         content=full_text,
                         reasoning_content=full_reasoning,
@@ -777,7 +713,6 @@ class DeepSeekProxy:
                         request_id=request_id,
                     )
 
-            # --- Text Content Handling ---
             delta_content = delta.content if delta and delta.content else ""
             content_to_yield = ""
 
@@ -806,7 +741,6 @@ class DeepSeekProxy:
                             full_text += chunk_safe
                             content_buffer = content_buffer[safe_chars:]
 
-            # --- Tool Calls Handling ---
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
@@ -837,7 +771,6 @@ class DeepSeekProxy:
                             "arguments"
                         ] += tc.function.arguments
 
-            # Check upstream finish reason
             upstream_finish = (
                 chunk.choices[0].finish_reason
                 if (chunk.choices and chunk.choices[0].finish_reason)
@@ -846,9 +779,6 @@ class DeepSeekProxy:
             if upstream_finish != "null":
                 finish_reason = upstream_finish
 
-            # --- Yield Content Logic ---
-
-            # Check if there is actual content to push
             has_content_update = (
                 content_to_yield
                 or current_tool_calls_payload
@@ -857,18 +787,15 @@ class DeepSeekProxy:
 
             if has_content_update:
                 if is_incremental:
-                    # Incremental mode: push only delta
                     yield self._build_stream_response(
                         content=content_to_yield,
-                        reasoning_content="",  # Reasoning handled above
+                        reasoning_content="",
                         tool_calls=current_tool_calls_payload,
                         finish_reason=(finish_reason if stop_triggered else "null"),
                         usage=accumulated_usage,
                         request_id=request_id,
                     )
                 else:
-                    # Non-incremental mode: push full text
-                    # Note: Full tool calls are usually sent at the end in non-incremental mode
                     yield self._build_stream_response(
                         content=full_text,
                         reasoning_content=full_reasoning,
@@ -881,12 +808,8 @@ class DeepSeekProxy:
             if stop_triggered:
                 break
 
-        # --- End of Stream Handling ---
-
-        # Flush leftover buffer if not stopped
         if not stop_triggered and content_buffer and stop_sequences:
             full_text += content_buffer
-            # Flush remaining buffer based on mode
             if is_incremental:
                 yield self._build_stream_response(
                     content=content_buffer,
@@ -906,9 +829,7 @@ class DeepSeekProxy:
                     request_id=request_id,
                 )
 
-        # Final Finish Handling
         if not is_incremental:
-            # Final packet for non-incremental mode: includes finish_reason and complete Tool Calls
             if stop_sequences:
                 earliest_idx, _ = self._find_earliest_stop(full_text, stop_sequences)
                 if earliest_idx != -1:
@@ -930,7 +851,6 @@ class DeepSeekProxy:
                 request_id=request_id,
             )
         else:
-            # Incremental mode: send empty end packet if not triggered by stop
             if not stop_triggered and finish_reason != "null":
                 yield self._build_stream_response(
                     content="",
@@ -944,7 +864,6 @@ class DeepSeekProxy:
     def _build_stream_response(
         self, content, reasoning_content, tool_calls, finish_reason, usage, request_id
     ):
-        """Helper to format SSE data line"""
         message_body = {
             "role": "assistant",
             "content": content,
@@ -972,7 +891,6 @@ class DeepSeekProxy:
         choice = completion.choices[0]
         msg = choice.message
 
-        # --- Stop Logic (Unary) ---
         final_content = msg.content
         finish_reason = choice.finish_reason
 
@@ -1006,7 +924,7 @@ class DeepSeekProxy:
 
         message_body = {
             "role": msg.role,
-            "content": final_content,  # Uses the potentially truncated content
+            "content": final_content,
             "reasoning_content": getattr(msg, "reasoning_content", ""),
         }
         if msg.tool_calls:
@@ -1025,7 +943,6 @@ class DeepSeekProxy:
         )
 
 
-# --- FastAPI Application Lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop_event = threading.Event()
@@ -1102,10 +1019,9 @@ def create_app() -> FastAPI:
     )
 
     @app.exception_handler(RequestValidationError)
-    @app.exception_handler(ValidationError)  # Catch errors during manual parsing
+    @app.exception_handler(ValidationError)
     async def validation_exception_handler(request, exc):
         try:
-            # Compatible with two ways of retrieving errors
             errors = exc.errors() if hasattr(exc, "errors") else []
         except Exception:
             errors = [{"msg": str(exc), "loc": [], "type": "unknown"}]
@@ -1126,8 +1042,6 @@ def create_app() -> FastAPI:
         path_str = ".".join([str(x) for x in loc if x != "body"])
         err_type = err.get("type")
         input_value = err.get("input")
-
-        # Keep original logic below
 
         if err_type == "int_parsing":
             if isinstance(input_value, str):
@@ -1224,7 +1138,6 @@ def create_app() -> FastAPI:
                 },
             )
 
-        # Fallback logging
         logger.error(f"Validation Error: {errors}")
 
         return JSONResponse(
@@ -1382,7 +1295,6 @@ def create_app() -> FastAPI:
     return app
 
 
-# --- Mock Server Utilities ---
 def run_server_process(req_q, res_q, host="0.0.0.0", port=8000):
     if req_q and res_q:
         SERVER_STATE.set_queues(req_q, res_q)
