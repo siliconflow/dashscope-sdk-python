@@ -6,6 +6,7 @@ from typing import Dict, Any
 
 # --- CONFIGURATION ---
 BASE_URL_PREFIX = "http://localhost:8000/siliconflow/models"
+BASE_URL_PREFIX = "https://api-bailian.siliconflow.cn/siliconflow/models"
 API_KEY = os.getenv("SILICONFLOW_API_KEY", "test_api_key")
 
 HEADERS = {
