@@ -37,7 +37,6 @@ ERR_MSG_TEMP_RANGE = (
     "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]"
 )
 ERR_MSG_PARTIAL_THINKING_CONFLICT = "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true"
-ERR_MSG_R1_THINKING = "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}"
 ERR_MSG_TOOL_CHOICE = '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]'
 
 
