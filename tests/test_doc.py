@@ -42,20 +42,33 @@ ERR_MSG_TOOL_CHOICE = '<400> InternalError.Algo.InvalidParameter: tool_choice is
 
 # --- HELPERS ---
 
-def make_request(payload: Dict[str, Any]) -> requests.Response:
-    """Helper to send POST request using the Dynamic Path URL structure."""
+def make_request(payload: Dict[str, Any], stream: bool = True) -> requests.Response:
+    """
+    Helper to send POST request using the Dynamic Path URL structure.
+    Args:
+        payload: The request body.
+        stream: Whether to use streaming (SSE). Defaults to True.
+    """
     raw_model_name = payload.get("model")
 
-    # [MODIFIED] 严格检查：如果模型名称不在映射中，直接报错（Fail Test）
     if raw_model_name not in MODEL_PATH_MAP:
-        pytest.fail(f"Configuration Error: Model '{raw_model_name}' is not defined in MODEL_PATH_MAP. Please update the mapping.")
+        pytest.fail(f"Configuration Error: Model '{raw_model_name}' not in MAP.")
 
     model_path = MODEL_PATH_MAP[raw_model_name]
-
-    # [注释] 测试的时候必须是http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-V3这样的URL
     url = f"{BASE_URL_PREFIX}/{model_path}"
 
-    return requests.post(url, headers=HEADERS, json=payload, stream=True)
+    # 处理 Headers
+    current_headers = HEADERS.copy()
+    if not stream:
+        current_headers["Accept"] = "application/json"
+        # 移除 SSE 标记
+        if "X-DashScope-SSE" in current_headers:
+            del current_headers["X-DashScope-SSE"]
+
+    # 注意：requests.post 的 stream 参数控制是否立即下载响应体，
+    # 但业务层面的流式由 headers 和 json body 决定，这里保持 requests 的 stream=True
+    # 只是为了方便拿到原始响应，或者统一设为 stream 变量也可以。
+    return requests.post(url, headers=current_headers, json=payload, stream=True)
 
 
 def assert_exact_error(
@@ -199,35 +212,44 @@ class TestFunctionalFixes:
 
     def test_non_streaming_request(self):
         """
-        [Updated] 验证非流式返回，需同样应用 URL 映射逻辑和严格检查
+        [Row 16] 验证非流式返回 (incremental_output=false)
+        使用优化后的 make_request，代码更干净
         """
         payload = {
             "model": "pre-siliconflow/deepseek-v3.2",
             "input": {"messages": [{"role": "user", "content": "Say hi"}]},
-            "parameters": {},
+            "parameters": {"incremental_output": False}, # 显式设置参数
         }
 
-        # 1. 解析模型并应用严格映射检查
-        raw_model_name = payload.get("model")
-
-        # [MODIFIED] 严格检查
-        if raw_model_name not in MODEL_PATH_MAP:
-             pytest.fail(f"Configuration Error: Model '{raw_model_name}' is not defined in MODEL_PATH_MAP. Please update the mapping.")
-
-        model_path = MODEL_PATH_MAP[raw_model_name]
-
-        # 2. 拼接 URL
-        url = f"{BASE_URL_PREFIX}/{model_path}"
-
-        headers_no_stream = HEADERS.copy()
-        headers_no_stream["Accept"] = "application/json"
-        del headers_no_stream["X-DashScope-SSE"]
-
-        response = requests.post(url, headers=headers_no_stream, json=payload)
+        # 调用优化后的 helper，传入 stream=False
+        response = make_request(payload, stream=False)
 
         assert response.status_code == 200, f"Non-streaming request failed: {response.text}"
         data = response.json()
+        # 非流式应该直接返回 output 字段，而不是 SSE 的 delta
         assert "output" in data, "Non-streaming response missing 'output' field"
+
+    def test_stop_behavior_in_reasoning(self):
+        """
+        [Row 7] stop 在 reasoning content 阶段生效
+        验证：设置 stop word 为思考过程中必然出现的词（如 'step' 或 'thinking'），
+        确认模型是否异常截断或按预期行为处理（取决于预期是忽略还是截断）。
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-r1", # 必须是思考模型
+            "input": {"messages": [{"role": "user", "content": "Count from 1 to 5 step by step"}]},
+            "parameters": {
+                "stop": ["step"], # 这是一个在思考过程中很容易出现的词
+                "enable_thinking": True
+            }
+        }
+        response = make_request(payload)
+
+        # 这里的断言取决于你们的预期：
+        # 如果预期是不支持（即不会截断），则 status_code 200 且内容完整。
+        # 如果预期是会截断导致格式错误，则捕获错误。
+        assert response.status_code == 200
+        # 进一步可以检查 response.text 中是否包含 reasoning_content
 
     def test_thinking_budget_behavior(self):
         payload = {
