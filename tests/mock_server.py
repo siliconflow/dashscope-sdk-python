@@ -337,7 +337,7 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": f"<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0], but got {params.top_p}",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0]",
                     },
                 )
 
@@ -347,7 +347,7 @@ class DeepSeekProxy:
                     status_code=400,
                     content={
                         "code": "InvalidParameter",
-                        "message": f"<400> InternalError.Algo.InvalidParameter: Temperature should be in [0, 2], but got {params.temperature}",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]",
                     },
                 )
 
@@ -455,8 +455,8 @@ class DeepSeekProxy:
             return JSONResponse(
                 status_code=400,
                 content={
-                    "code": "InvalidParameter",
-                    "message": "Value error, current model does not support parameter `enable_thinking`.",
+                    "code": "InternalError",
+                    "message": "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}",
                 },
             )
 

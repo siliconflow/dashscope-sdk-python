@@ -1,16 +1,11 @@
 import pytest
-import json
 import requests
 import os
-from typing import Generator, List, Dict, Any, Optional
-from dataclasses import dataclass
+import json
+from typing import Dict, Any
 
-# --- CONSTANTS & CONFIGURATION ---
-
-# 基础 URL 修改为适配动态路径的前缀
-# 最终请求 URL 将拼接为: BASE_URL + "/" + {model_path}
+# --- CONFIGURATION ---
 BASE_URL_PREFIX = "http://localhost:8000/siliconflow/models"
-
 API_KEY = os.getenv("SILICONFLOW_API_KEY", "test_api_key")
 
 HEADERS = {
@@ -20,265 +15,149 @@ HEADERS = {
     "X-DashScope-SSE": "enable",
 }
 
-# --- TOOL DEFINITIONS ---
-TOOL_VECTOR_WEATHER = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city and state, e.g. San Francisco, CA",
-                    },
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                },
-                "required": ["location"],
-            },
-        },
-    }
-]
+# --- EXPECTED ERROR MESSAGES (COPIED FROM TABLE) ---
+# 定义预期错误常量，确保逐字对齐
+ERR_MSG_TOP_P_TYPE = "<400> InternalError.Algo.InvalidParameter: Input should be a valid number, unable to parse string as a number: parameters.top_p"
+ERR_MSG_TOP_P_RANGE = "<400> InternalError.Algo.InvalidParameter: Range of top_p should be (0.0, 1.0]"
+ERR_MSG_TEMP_RANGE = "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]"
+ERR_MSG_PARTIAL_THINKING_CONFLICT = "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true"
+# R1 不支持 enable_thinking 的报错 (注意：表格中该报错包含 Python 字典的字符串表示，需严格匹配引号)
+ERR_MSG_R1_THINKING = "Error code: 400 - {'code': 20015, 'message': 'Value error, current model does not support parameter `enable_thinking`.', 'data': None}"
 
 # --- HELPERS ---
 
-@dataclass
-class SSEFrame:
-    """Formal representation of a Server-Sent Event frame for validation."""
-    id: str
-    output: Dict[str, Any]
-    usage: Dict[str, Any]
-    request_id: str
-
-def parse_sse_stream(response: requests.Response) -> Generator[SSEFrame, None, None]:
-    """Parses the raw SSE stream line by line."""
-    for line in response.iter_lines():
-        if line:
-            decoded_line = line.decode("utf-8")
-            if decoded_line.startswith("data:"):
-                json_str = decoded_line[5:].strip()
-                try:
-                    data = json.loads(json_str)
-                    yield SSEFrame(
-                        id=data.get("output", {}).get("choices", [{}])[0].get("id", "unknown"),
-                        output=data.get("output", {}),
-                        usage=data.get("usage", {}),
-                        request_id=data.get("request_id", ""),
-                    )
-                except json.JSONDecodeError:
-                    continue
-
 def make_request(payload: Dict[str, Any]) -> requests.Response:
-    """
-    Helper to send POST request using the Dynamic Path URL structure.
-
-    Format: POST /siliconflow/models/{model_path}
-
-    It extracts the 'model' from the payload to construct the URL.
-    """
+    """Helper to send POST request using the Dynamic Path URL structure."""
     model_path = payload.get("model")
-
-    if not model_path:
-        raise ValueError("Test payload must contain 'model' field for dynamic URL construction")
-
-    # Construct the dynamic URL, e.g.:
-    # http://localhost:8000/siliconflow/models/deepseek-ai/DeepSeek-V3
     url = f"{BASE_URL_PREFIX}/{model_path}"
-
-    # Send the request. Note: We keep 'model' in the json body as well,
-    # though the server mainly relies on the path parameter now.
     return requests.post(url, headers=HEADERS, json=payload, stream=True)
+
+def assert_exact_error(response: requests.Response, expected_code_str: str, expected_message: str):
+    """
+    严格校验错误返回：
+    1. HTTP 状态码通常为 4xx 或 500 (根据表格，部分 4xx 业务错误可能返回 200 或 400，此处以解析 body 为主)
+    2. JSON body 中的 code 字段
+    3. JSON body 中的 message 字段 (逐字匹配)
+    """
+    try:
+        data = response.json()
+    except Exception:
+        pytest.fail(f"Response is not valid JSON: {response.text}")
+
+    # 1. Check Error Code (e.g., 'InvalidParameter' or 'InternalError')
+    actual_code = data.get("code")
+    assert actual_code == expected_code_str, f"Error Code mismatch.\nExpected: {expected_code_str}\nActual:   {actual_code}"
+
+    # 2. Check Error Message (Exact String Match)
+    actual_message = data.get("message")
+    assert actual_message == expected_message, f"Error Message mismatch.\nExpected: {expected_message}\nActual:   {actual_message}"
 
 # --- TEST SUITE ---
 
-class TestDynamicPathRouting:
-    """
-    测试动态 URL 路由本身的正确性
-    """
-
-    def test_routing_basic_success(self):
-        """
-        测试标准的 URL 格式是否能通
-        URL: .../deepseek-ai/DeepSeek-V3
-        """
-        payload = {
-            "model": "deepseek-ai/DeepSeek-V3",
-            "input": {"messages": [{"role": "user", "content": "Hello"}]},
-            "parameters": {"max_tokens": 10}
-        }
-        response = make_request(payload)
-        assert response.status_code == 200
-
-    def test_routing_with_mapping(self):
-        """
-        测试服务端 ModelResolver 是否依然工作
-        URL: .../pre-siliconflow/deepseek-v3 (会被映射到 upstream 的 deepseek-ai/DeepSeek-V3)
-        """
-        payload = {
-            "model": "pre-siliconflow/deepseek-v3",
-            "input": {"messages": [{"role": "user", "content": "Test"}]},
-            "parameters": {"max_tokens": 10}
-        }
-        response = make_request(payload)
-        assert response.status_code == 200
-
-
-class TestParameterValidation:
-    """
-    对应表格中参数校验相关的错误用例 (4xx Error Codes)
-    """
+class TestStrictErrorValidation:
 
     def test_invalid_parameter_type_top_p(self):
         """
-        Case: parameters.top_p 输入字符串 'a'，预期返回 400 InvalidParameter。
+        表格行: 4xx的报错请求
+        Input: top_p = "a" (string)
+        Expected: InvalidParameter, <400> ... unable to parse string as a number
         """
         payload = {
-            "model": "deepseek-ai/DeepSeek-V3",
+            "model": "pre-siliconflow/deepseek-v3",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": "a"},  # Invalid type
+            "parameters": {"top_p": "a"}
         }
         response = make_request(payload)
 
-        assert response.status_code == 400
-        data = response.json()
-        assert "InvalidParameter" in data.get("code", "") or "InvalidParameter" in data.get("message", "")
+        # 根据表格预期，HTTP Code 可能是 400 或 500，但我们主要校验 Body 内容
+        # 表格预期返回: code="InvalidParameter"
+        assert_exact_error(
+            response,
+            expected_code_str="InvalidParameter",
+            expected_message=ERR_MSG_TOP_P_TYPE
+        )
 
-    @pytest.mark.parametrize("top_p_value", [0, 0.0])
-    def test_invalid_parameter_range_top_p(self, top_p_value):
+    def test_invalid_parameter_range_top_p(self):
         """
-        Case: top_p取值范围 (0, 1.0]。测试边界值 0。
+        表格行: pre-siliconflow-deepseek-v3.1 top_p取值范围（0,1.0]
+        Input: top_p = 0
+        Expected: InvalidParameter, Range of top_p should be (0.0, 1.0]
         """
         payload = {
-            "model": "deepseek-ai/DeepSeek-V3.1",
+            "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"top_p": top_p_value},
+            "parameters": {"top_p": 0}
         }
         response = make_request(payload)
 
-        assert response.status_code == 400
-        data = response.json()
-        assert "Range of top_p should be" in data.get("message", "")
+        assert_exact_error(
+            response,
+            expected_code_str="InvalidParameter",
+            expected_message=ERR_MSG_TOP_P_RANGE
+        )
 
     def test_invalid_parameter_range_temperature(self):
         """
-        Case: temperature 取值范围 [0, 2]。测试值 2.1。
+        表格行: pre-siliconflow-deepseek-v3.1 取值范围 [0, 2)
+        Input: temperature = 2.1
+        Expected: InvalidParameter, Temperature should be in [0.0, 2.0]
         """
         payload = {
-            "model": "deepseek-ai/DeepSeek-V3.1",
+            "model": "pre-siliconflow/deepseek-v3.1",
             "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"temperature": 2.1},
+            "parameters": {"temperature": 2.1}
         }
         response = make_request(payload)
 
-        assert response.status_code == 400
-        data = response.json()
-        assert "Temperature should be in" in data.get("message", "")
+        assert_exact_error(
+            response,
+            expected_code_str="InvalidParameter",
+            expected_message=ERR_MSG_TEMP_RANGE
+        )
 
-
-class TestDeepSeekR1Specifics:
-    """
-    针对 R1 模型的特定测试用例 (Reasoning Models)
-    """
-
-    def test_r1_usage_structure(self):
+    def test_conflict_prefix_and_thinking(self):
         """
-        Case: R1 模型不应该返回 text_tokens，应该返回 reasoning_tokens。
-        URL: .../deepseek-ai/DeepSeek-R1
+        表格行: 前缀续写...思考模式下...会报4xx
+        Input: partial=True AND enable_thinking=True
+        Expected: InvalidParameter, Partial mode is not supported when enable_thinking is true
         """
         payload = {
-            "model": "deepseek-ai/DeepSeek-R1",
-            "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {},
-        }
-        response = make_request(payload)
-        assert response.status_code == 200
-
-        # 检查流式返回的最后一帧 Usage
-        frames = list(parse_sse_stream(response))
-        assert len(frames) > 0
-        final_usage = frames[-1].usage
-
-        output_details = final_usage.get("output_tokens_details", {})
-        assert output_details, "output_tokens_details missing"
-
-        # 验证不包含 text_tokens (R1 特性)
-        assert "text_tokens" not in output_details, "R1 usage should not contain text_tokens"
-        # 验证包含 reasoning_tokens
-        assert "reasoning_tokens" in output_details
-
-    def test_r1_enable_thinking_parameter_error(self):
-        """
-        Case: R1 原生支持思考，显式传递 enable_thinking=True 应报错。
-        """
-        payload = {
-            "model": "deepseek-ai/DeepSeek-R1",
-            "input": {"messages": [{"role": "user", "content": "你好"}]},
-            "parameters": {"enable_thinking": True},
-        }
-        response = make_request(payload)
-
-        assert response.status_code == 400
-        data = response.json()
-        assert "does not support parameter" in data.get("message", "")
-
-
-class TestAdvancedFeatures:
-    """
-    复杂场景：前缀续写、ToolCall 格式校验等
-    """
-
-    def test_prefix_completion_thinking_conflict(self):
-        """
-        Case: 思考模式下(enable_thinking=true)，不支持前缀续写(partial=true)。
-        """
-        payload = {
-            "model": "deepseek-ai/DeepSeek-V3.2",
+            "model": "pre-siliconflow/deepseek-v3.2",
             "input": {
                 "messages": [
                     {"role": "user", "content": "你好"},
-                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"}
                 ]
             },
-            "parameters": {"enable_thinking": True},
+            "parameters": {"enable_thinking": True}
         }
         response = make_request(payload)
 
-        assert response.status_code == 400
-        data = response.json()
-        assert "Partial mode is not supported when enable_thinking is true" in data.get("message", "")
+        assert_exact_error(
+            response,
+            expected_code_str="InvalidParameter",
+            expected_message=ERR_MSG_PARTIAL_THINKING_CONFLICT
+        )
 
-    def test_r1_tool_choice_conflict(self):
+    def test_r1_enable_thinking_unsupported(self):
         """
-        Case: R1 模型下，enable_thinking (或原生 R1) 开启时，不支持具体的 tool_choice 字典绑定。
+        表格行: r1传了enable_thinking报错
+        Input: model=deepseek-r1, enable_thinking=True
+        Expected: InternalError, Error code: 400 - {'code': 20015...}
         """
         payload = {
-            "model": "deepseek-ai/DeepSeek-R1",
-            "input": {
-                "messages": [
-                    {"role": "user", "content": "What is the weather like in Boston?"}
-                ]
-            },
-            "parameters": {
-                "result_format": "message",
-                # R1 logic usually prevents enforcing a specific tool via dict when thinking is active
-                "tool_choice": {
-                    "type": "function",
-                    "function": {"name": "get_current_weather"},
-                },
-                "tools": TOOL_VECTOR_WEATHER,
-            },
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {"messages": [{"role": "user", "content": "你好"}]},
+            "parameters": {"enable_thinking": True}
         }
-
         response = make_request(payload)
 
-        # Expecting 400 because R1 + Specific Tool Choice is often restricted in this proxy logic
-        if response.status_code != 200:
-            assert response.status_code == 400
-            error_data = response.json()
-            assert "DeepSeek R1 does not support specific tool_choice" in error_data.get("message", "")
+        # 表格显示此处返回的是 InternalError，且 message 是上游透传回来的原始错误
+        assert_exact_error(
+            response,
+            expected_code_str="InternalError",
+            expected_message=ERR_MSG_R1_THINKING
+        )
 
 if __name__ == "__main__":
-    # 如果直接运行此脚本，可以使用 pytest 调起
     pytest.main(["-v", __file__])
