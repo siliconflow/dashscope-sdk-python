@@ -3,8 +3,6 @@ import json
 import time
 import uuid
 import logging
-import threading
-import multiprocessing
 import asyncio
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator, Tuple
 from contextlib import asynccontextmanager
@@ -29,7 +27,6 @@ logger = logging.getLogger("DeepSeekProxy")
 SILICON_FLOW_BASE_URL = os.getenv(
     "SILICON_FLOW_BASE_URL", "https://api.siliconflow.cn/v1"
 )
-_MOCK_ENV_API_KEY = os.getenv("SILICON_FLOW_API_KEY")
 
 
 @dataclass
@@ -74,11 +71,8 @@ class ServerState:
     _instance = None
 
     def __init__(self):
-        self.request_queue: Optional[multiprocessing.Queue] = None
-        self.response_queue: Optional[multiprocessing.Queue] = None
         self.active_requests: int = 0
         self._lock: Optional[asyncio.Lock] = None
-        self.is_mock_mode = False
 
     @classmethod
     def get_instance(cls):
@@ -93,12 +87,6 @@ class ServerState:
             self._lock = asyncio.Lock()
         return self._lock
 
-    def set_queues(self, req_q, res_q):
-        self.request_queue = req_q
-        self.response_queue = res_q
-        self.is_mock_mode = True
-        logger.warning("!!! Server running in MOCK MODE via Queue Injection !!!")
-
     async def increment_request(self):
         async with self.lock:
             self.active_requests += 1
@@ -112,33 +100,7 @@ class ServerState:
         async with self.lock:
             return {
                 "active_requests": self.active_requests,
-                "is_mock_mode": self.is_mock_mode,
             }
-
-    async def mock_request_interaction(
-        self, request_body: Dict[str, Any], timeout: float = 10.0
-    ) -> Dict[str, Any]:
-        """
-        Handles the interaction with the multiprocessing Queue in a non-blocking way.
-        This fixes the blocking issue by offloading queue.get/put to the executor.
-        """
-        loop = asyncio.get_running_loop()
-
-        # 1. Offload the blocking put operation
-        await loop.run_in_executor(None, self.request_queue.put, request_body)
-
-        # 2. Offload the blocking get operation
-        # We use a lambda to pass the timeout to the queue.get method
-        def blocking_get():
-            return self.response_queue.get(timeout=timeout)
-
-        response_data = await loop.run_in_executor(None, blocking_get)
-
-        return (
-            json.loads(response_data)
-            if isinstance(response_data, str)
-            else response_data
-        )
 
 
 SERVER_STATE = ServerState.get_instance()
@@ -974,11 +936,8 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(5)
             state = await SERVER_STATE.get_snapshot()
-            if state["active_requests"] > 0 or state["is_mock_mode"]:
-                logger.info(
-                    f"[Monitor] Active: {state['active_requests']} | "
-                    f"Mode: {'MOCK' if state['is_mock_mode'] else 'PRODUCTION'}"
-                )
+            if state["active_requests"] > 0:
+                logger.info(f"[Monitor] Active: {state['active_requests']}")
 
     monitor_task = asyncio.create_task(epoch_clock())
     yield
@@ -997,10 +956,7 @@ def _prepare_proxy_and_headers(
 
     x_api_key = request.headers.get("x-api-key")
 
-    if SERVER_STATE.is_mock_mode:
-        api_key = _MOCK_ENV_API_KEY or "mock-key"
-
-    elif x_api_key:
+    if x_api_key:
         api_key = x_api_key
         logger.debug(
             f"Request {request_id}: Using x-api-key for authorization override."
@@ -1198,7 +1154,7 @@ def create_app() -> FastAPI:
             content={
                 "status": "healthy",
                 "service": "DeepSeek-Proxy",
-                "mode": "mock" if SERVER_STATE.is_mock_mode else "production",
+                "mode": "production",
             },
         )
 
@@ -1228,26 +1184,6 @@ def create_app() -> FastAPI:
                 f"SSE detected (Accept: {accept_header}, X-DashScope-SSE: {dashscope_sse}), enabling stream transport"
             )
             force_stream = True
-
-        if SERVER_STATE.is_mock_mode:
-            if body:
-                try:
-                    if _MOCK_ENV_API_KEY:
-                        # Just to ensure init consistency even if not used
-                        _ = DeepSeekProxy(api_key=_MOCK_ENV_API_KEY)
-                except Exception:
-                    pass
-
-            try:
-                raw_body = await request.json()
-                # Use the new async-safe mock interaction
-                response_json = await SERVER_STATE.mock_request_interaction(raw_body)
-                status_code = response_json.pop("status_code", 200)
-                return JSONResponse(content=response_json, status_code=status_code)
-            except Exception as e:
-                return JSONResponse(
-                    status_code=500, content={"code": "MockError", "message": str(e)}
-                )
 
         return await proxy.generate(body, request_id, force_stream=force_stream)
 
@@ -1283,73 +1219,12 @@ def create_app() -> FastAPI:
 
     @app.api_route("/{path_name:path}", methods=["GET", "POST", "DELETE", "PUT"])
     async def catch_all(path_name: str, request: Request):
-        if SERVER_STATE.is_mock_mode:
-            try:
-                body = None
-                if request.method in ["POST", "PUT"]:
-                    try:
-                        body = await request.json()
-                    except:
-                        pass
-                req_record = {
-                    "path": f"/{path_name}",
-                    "method": request.method,
-                    "headers": dict(request.headers),
-                    "body": body,
-                }
-                # Use the new async-safe mock interaction
-                response_json = await SERVER_STATE.mock_request_interaction(
-                    req_record, timeout=5.0
-                )
-                status_code = response_json.pop("status_code", 200)
-                return JSONResponse(content=response_json, status_code=status_code)
-            except Exception as e:
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": "Mock Catch-All Error", "detail": str(e)},
-                )
-
         return JSONResponse(
             status_code=404,
             content={"code": "NotFound", "message": "Proxy endpoint not implemented"},
         )
 
     return app
-
-
-def run_server_process(req_q, res_q, host="0.0.0.0", port=8000):
-    if req_q and res_q:
-        SERVER_STATE.set_queues(req_q, res_q)
-    app = create_app()
-    uvicorn.run(app, host=host, port=port, log_level="info")
-
-
-class MockServer:
-    def __init__(self) -> None:
-        self.requests = multiprocessing.Queue()
-        self.responses = multiprocessing.Queue()
-        self.proc = None
-
-
-def create_mock_server(*args, **kwargs):
-    mock_server = MockServer()
-    proc = multiprocessing.Process(
-        target=run_server_process,
-        args=(mock_server.requests, mock_server.responses, "0.0.0.0", 8089),
-    )
-    proc.start()
-    mock_server.proc = proc
-    time.sleep(1.5)
-    logger.info("Mock Server started on port 8089")
-    if args and hasattr(args[0], "addfinalizer"):
-
-        def stop_server():
-            if proc.is_alive():
-                proc.terminate()
-                proc.join()
-
-        args[0].addfinalizer(stop_server)
-    return mock_server
 
 
 def run_server(host="0.0.0.0", port=8000):
