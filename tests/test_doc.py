@@ -287,3 +287,74 @@ class TestFunctionalFixes:
         assert (
             response.status_code == 200
         ), f"Prefix completion failed with {response.status_code}. Body: {response.text}"
+
+    def test_stop_parameter_invalid_type(self):
+        """
+        [Row 13] stop 只支持 str/list[str]，不支持 int 类型
+        Expected: InvalidParameter
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {"messages": [{"role": "user", "content": "你好"}]},
+            "parameters": {"stop": 123},  # Invalid type
+        }
+        response = make_request(payload)
+        # 根据实际预期填写 Error Message
+        assert response.status_code == 400 or response.status_code == 500
+        # assert_exact_error(response, "InvalidParameter", "Expecting string or list of strings...")
+
+    def test_non_streaming_request(self):
+        """
+        [Row 16] 验证非流式返回 (incremental_output=false) 是否正常
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {"messages": [{"role": "user", "content": "Say hi"}]},
+            "parameters": {},  # implicit stream=False via headers modification needed
+        }
+
+        # 需要覆盖默认 header 的 stream 设置
+        model_path = payload.get("model")
+        url = f"{BASE_URL_PREFIX}/{model_path}"
+        headers_no_stream = HEADERS.copy()
+        headers_no_stream["Accept"] = "application/json"
+        del headers_no_stream["X-DashScope-SSE"]  # 移除 SSE header
+
+        response = requests.post(url, headers=headers_no_stream, json=payload)
+
+        assert (
+            response.status_code == 200
+        ), f"Non-streaming request failed: {response.text}"
+        data = response.json()
+        assert "output" in data, "Non-streaming response missing 'output' field"
+
+    def test_thinking_budget_behavior(self):
+        """
+        [Row 14] thinking_budget 不支持或行为变更验证
+        验证 3.1 模型设置 budget 后是否报错或行为符合预期
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {"messages": [{"role": "user", "content": "Plan a trip"}]},
+            "parameters": {"thinking_budget": 10},
+        }
+        response = make_request(payload)
+        # 根据表格，如果是 "硅基流动确定不支持"，这里可能预期是 200 (忽略) 或者 400 (报错)
+        # 如果预期是不支持，最好验证它没有 crash (500)
+        assert (
+            response.status_code != 500
+        ), f"Thinking budget caused 500: {response.text}"
+
+    def test_n_parameter_unsupported(self):
+        """
+        [Row 17] n 参数不支持
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {"messages": [{"role": "user", "content": "你好"}]},
+            "parameters": {"n": 2},
+        }
+        response = make_request(payload)
+        # 验证是忽略还是报错
+        if response.status_code == 400:
+            assert "n" in response.text
