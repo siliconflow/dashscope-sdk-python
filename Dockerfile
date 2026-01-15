@@ -2,28 +2,27 @@
 
 FROM python:3.11-slim-bookworm
 
-WORKDIR /app
+# 建议：将工作目录改为 /src 或 /code，避免和 app 包名混淆
+WORKDIR /src
 
-# Install uv (better: copy the static binary from the official uv image)
+# --- 1. 安装依赖环境 ---
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Optional but common: keep uv caches in a known place
 ENV UV_CACHE_DIR=/root/.cache/uv
 
-# Copy only dependency inputs first for better Docker layer caching
 COPY pyproject.toml uv.lock ./
-
-# Create/sync the project environment from the lockfile
-# --frozen: fail if lock and project metadata don't match; don't update the lock
-# --no-dev: skip dev dependency groups in the final image
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Now copy the rest of the app
-COPY tests/mock_server.py ./main.py
+# --- 2. 复制代码 ---
+# 将本地的 app 目录 复制到 容器的 /src/app
+COPY app ./app
+# 复制配置文件
+COPY gunicorn.conf.py .
 
-# Make sure the venv's executables are on PATH
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/src/.venv/bin:$PATH"
 
 EXPOSE 8000
-CMD ["uv", "run", "--frozen", "python", "main.py"]
+
+# --- 3. 启动命令 ---
+# app.main:app 代表：包名(app) -> 文件名(main) -> 实例名(app)
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
