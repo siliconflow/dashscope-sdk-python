@@ -6,7 +6,7 @@ from typing import Dict, Any
 
 # --- CONFIGURATION ---
 BASE_URL_PREFIX = "http://localhost:8000/siliconflow/models"
-BASE_URL_PREFIX = "https://api-bailian.siliconflow.cn/siliconflow/models"
+# BASE_URL_PREFIX = "https://api-bailian.siliconflow.cn/siliconflow/models"
 API_KEY = os.getenv("SILICONFLOW_API_KEY", "test_api_key")
 
 HEADERS = {
@@ -38,8 +38,7 @@ ERR_MSG_TEMP_RANGE = (
     "<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0]"
 )
 ERR_MSG_PARTIAL_THINKING_CONFLICT = "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true"
-ERR_MSG_TOOL_CHOICE = '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]'
-
+ERR_MSG_TOOL_CHOICE = "<400> InternalError.Algo.InvalidParameter: Input should be a valid string: parameters.tool_choice.str & Field required: parameters.tool_choice.ToolChoice.function"
 
 # --- HELPERS ---
 
@@ -356,3 +355,71 @@ class TestFunctionalFixes:
         response = make_request(payload)
         if response.status_code == 400:
             assert "n" in response.text
+
+
+    def test_r1_force_tool_choice_with_complex_tools(self):
+        """
+        Test derived from curl command:
+        Scenario: DeepSeek-R1 with multiple tools and explicit tool_choice object.
+        Expected: Should fail validation because tool_choice must be 'none' or 'auto' (string),
+        not a dictionary object, consistent with ERR_MSG_TOOL_CHOICE.
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "What is the weather like in Boston?"}
+                ]
+            },
+            "parameters": {
+                "result_format": "message",
+                "tool_choice": {"type": "get_current_weather"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather in a given location",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city and state, e.g. San Francisco, CA",
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": ["celsius", "fahrenheit"],
+                                    },
+                                },
+                                "required": ["location"],
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_time",
+                            "description": "Get the current time in a given location",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city and state, e.g. San Francisco, CA",
+                                    },
+                                    "unit": {"type": "string", "enum": []},
+                                },
+                                "required": ["location"],
+                            },
+                        },
+                    },
+                ],
+            },
+            "resources": [],
+        }
+
+        response = make_request(payload)
+
+        # 验证是否返回了预期的参数校验错误
+        assert_exact_error(response, "InvalidParameter", ERR_MSG_TOOL_CHOICE)

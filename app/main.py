@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
-from app.config import (
+from config import (
     get_logging_config,
     SILICON_FLOW_BASE_URL,
     MODEL_MAPPING,
@@ -417,7 +417,7 @@ class DeepSeekProxy:
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
-                    "message": '<400> InternalError.Algo.InvalidParameter: tool_choice is one of the strings that should be ["none", "auto"]',
+                    "message": '<400> InternalError.Algo.InvalidParameter: Input should be a valid string: parameters.tool_choice.str & Field required: parameters.tool_choice.ToolChoice.function',
                 },
             )
 
