@@ -156,6 +156,7 @@ class Parameters(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     response_format: Optional[Dict[str, Any]] = None
+    logit_bias: Optional[Dict[str, float]] = None
 
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
@@ -535,6 +536,9 @@ class DeepSeekProxy:
 
         if params.seed:
             openai_params["seed"] = params.seed
+
+        if params.logit_bias is not None:
+            openai_params["logit_bias"] = params.logit_bias
 
         logger.debug(f"[Stop Sequences] Proxy handling stop for: {proxy_stop_list}")
 
