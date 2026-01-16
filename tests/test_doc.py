@@ -356,7 +356,6 @@ class TestFunctionalFixes:
         if response.status_code == 400:
             assert "n" in response.text
 
-
     def test_r1_force_tool_choice_with_complex_tools(self):
         """
         Test derived from curl command:
@@ -434,7 +433,10 @@ class TestFunctionalFixes:
             "input": {
                 "messages": [
                     {"role": "system", "content": "You are a translation helper."},
-                    {"role": "user", "content": "Please translate 'Hello' to Spanish using the tool."}
+                    {
+                        "role": "user",
+                        "content": "Please translate 'Hello' to Spanish using the tool.",
+                    },
                 ]
             },
             "parameters": {
@@ -449,20 +451,20 @@ class TestFunctionalFixes:
                                 "properties": {
                                     "translation": {
                                         "description": "The translated text",
-                                        "type": "string"
+                                        "type": "string",
                                     }
                                 },
-                                "required": ["translation"]
-                            }
-                        }
+                                "required": ["translation"],
+                            },
+                        },
                     }
                 ],
                 "tool_choice": "required",
                 # Important: Use non-streaming to check the final full object structure easily,
                 # or stream and reconstruct. The curl example used non-streaming (default).
                 # We will check the non-streaming response body.
-                "incremental_output": False
-            }
+                "incremental_output": False,
+            },
         }
 
         # Force non-streaming request to inspect the final message object directly
@@ -497,9 +499,12 @@ class TestFunctionalFixes:
         first_tool_call = tool_calls[0]
 
         # THE ASSERTION
-        assert "index" in first_tool_call, f"Missing 'index' field in tool_call object: {first_tool_call}"
-        assert first_tool_call["index"] == 0, f"Expected index 0, got {first_tool_call.get('index')}"
-
+        assert (
+            "index" in first_tool_call
+        ), f"Missing 'index' field in tool_call object: {first_tool_call}"
+        assert (
+            first_tool_call["index"] == 0
+        ), f"Expected index 0, got {first_tool_call.get('index')}"
 
     def test_dashscope_stream_tool_calls_type_presence(self):
         """
@@ -528,16 +533,16 @@ class TestFunctionalFixes:
                                 "properties": {
                                     "location": {
                                         "type": "string",
-                                        "description": "The city and state, e.g. San Francisco, CA"
+                                        "description": "The city and state, e.g. San Francisco, CA",
                                     },
                                     "unit": {
                                         "type": "string",
-                                        "enum": ["celsius", "fahrenheit"]
-                                    }
+                                        "enum": ["celsius", "fahrenheit"],
+                                    },
                                 },
-                                "required": ["location"]
-                            }
-                        }
+                                "required": ["location"],
+                            },
+                        },
                     },
                     {
                         "type": "function",
@@ -549,19 +554,16 @@ class TestFunctionalFixes:
                                 "properties": {
                                     "location": {
                                         "type": "string",
-                                        "description": "The city and state, e.g. San Francisco, CA"
+                                        "description": "The city and state, e.g. San Francisco, CA",
                                     },
-                                    "unit": {
-                                        "type": "string",
-                                        "enum": []
-                                    }
+                                    "unit": {"type": "string", "enum": []},
                                 },
-                                "required": ["location"]
-                            }
-                        }
-                    }
-                ]
-            }
+                                "required": ["location"],
+                            },
+                        },
+                    },
+                ],
+            },
         }
 
         response = make_request(payload, stream=True)
@@ -614,10 +616,14 @@ class TestFunctionalFixes:
                         )
 
                         # 顺便验证 index 字段 (通常也需要)
-                        assert "index" in tc, f"Missing 'index' field in tool_call packet: {json_str}"
+                        assert (
+                            "index" in tc
+                        ), f"Missing 'index' field in tool_call packet: {json_str}"
 
             except json.JSONDecodeError:
                 continue
 
         # 确保确实触发了工具调用，否则测试没有实际意义
-        assert packet_count_with_tool_calls > 0, "No tool calls were returned in the stream, test inconclusive."
+        assert (
+            packet_count_with_tool_calls > 0
+        ), "No tool calls were returned in the stream, test inconclusive."
