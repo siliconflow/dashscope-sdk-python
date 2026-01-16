@@ -59,6 +59,7 @@ class RequestIDFilter(logging.Filter):
 
 # Logging configuration - will be configured after request_id_ctx is available
 def get_logging_config(request_id_ctx=None):
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
     return {
         "version": 1,
         "disable_existing_loggers": False,
@@ -76,7 +77,7 @@ def get_logging_config(request_id_ctx=None):
         },
         "handlers": {
             "console": {
-                "level": "INFO",
+                "level": level,
                 "class": "logging.StreamHandler",
                 "formatter": "standard",
                 "filters": ["request_id"],
@@ -86,13 +87,13 @@ def get_logging_config(request_id_ctx=None):
         "loggers": {
             "DeepSeekProxy": {
                 "handlers": ["console"],
-                "level": "INFO",
+                "level": level,
                 "propagate": False,
             },
-            "uvicorn": {"handlers": ["console"], "level": "INFO", "propagate": False},
+            "uvicorn": {"handlers": ["console"], "level": level, "propagate": False},
             "uvicorn.access": {
                 "handlers": ["console"],
-                "level": "INFO",
+                "level": level,
                 "propagate": False,
             },
         },

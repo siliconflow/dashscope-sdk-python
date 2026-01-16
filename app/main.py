@@ -537,6 +537,10 @@ class DeepSeekProxy:
                         },
                     )
                 openai_params["tool_choice"] = params.tool_choice
+            else:
+                # FIX: Default to 'auto' if tools are provided but tool_choice is missing.
+                # This prevents 400 Bad Request errors from strict upstreams.
+                openai_params["tool_choice"] = "auto"
 
         if params.max_tokens is not None:
             openai_params["max_tokens"] = params.max_tokens
@@ -568,13 +572,18 @@ class DeepSeekProxy:
                 }
             )
             log_payload["messages"] = truncated_msgs
+        # populate extra_body into top-level for logging
+        if "extra_body" in log_payload:
+            for k, v in log_payload["extra_body"].items():
+                log_payload[k] = v
+            del log_payload["extra_body"]
 
         curl_cmd = (
             f"curl -X POST {SILICON_FLOW_BASE_URL}/chat/completions \\\n  "
             + " \\\n  ".join(curl_headers)
             + f" \\\n  -d '{json.dumps(log_payload, ensure_ascii=False)}'"
         )
-        logger.debug(f"[Curl Command]\n{curl_cmd}")
+        logger.debug(f"[request id: {initial_request_id}] Curl Command:\n{curl_cmd}")
 
         try:
             if openai_params["stream"]:
@@ -754,6 +763,12 @@ class DeepSeekProxy:
                         tc_dict = tc.model_dump()
                         if tc_dict.get("type") is None:
                             tc_dict["type"] = "function"
+
+                        # FIX: Sanitize 'id'. If upstream returns None (subsequent packets),
+                        # force it to empty string to satisfy strict schema/test requirements.
+                        if tc_dict.get("id") is None:
+                            tc_dict["id"] = ""
+
                         current_tool_calls_payload.append(tc_dict)
 
                 for tc in delta.tool_calls:
@@ -883,7 +898,13 @@ class DeepSeekProxy:
 
         response_body = {
             "output": {
-                "choices": [{"message": message_body, "finish_reason": finish_reason}]
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message_body,
+                        "finish_reason": finish_reason,
+                    }
+                ]
             },
             "usage": usage,
             "request_id": request_id,
@@ -946,7 +967,13 @@ class DeepSeekProxy:
 
         response_body = {
             "output": {
-                "choices": [{"message": message_body, "finish_reason": finish_reason}]
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message_body,
+                        "finish_reason": finish_reason,
+                    }
+                ]
             },
             "usage": usage_data,
             "request_id": request_id,

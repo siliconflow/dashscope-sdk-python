@@ -693,6 +693,15 @@ class TestFunctionalFixes:
 
         # 3. 定位 tool_calls
         message = choices[0].get("message", {})
+        finish_reason = choices[0].get("finish_reason")
+
+        # 针对问题 3 的防御性断言
+        if finish_reason == "tool_calls":
+            assert "tool_calls" in message, (
+                f"❌ Critical Bug: finish_reason is 'tool_calls' but 'tool_calls' field is missing in message.\n"
+                f"Full Response: {json.dumps(data, indent=2)}"
+            )
+
         tool_calls = message.get("tool_calls", [])
 
         assert (
@@ -824,3 +833,149 @@ class TestFunctionalFixes:
         assert_exact_error(
             response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
         )
+
+    def test_dash_stream_tool_calls_structure(self):
+        """
+        验证 DashScope 流式 (incremental_output=True) 下的结构修复:
+        1. 每一包 choices[0] 都有 'index': 0 (针对 1.16 问题 1)
+        2. Tool Call 每一包都有 'type': 'function'
+        3. Tool Call 每一包都有 'index'
+        4. Tool Call ID 仅在第一包有值，后续包为 "" 但字段必须存在 (针对 1.16 问题 2)
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "What's the weather in Tokyo?"}
+                ]
+            },
+            "parameters": {
+                "incremental_output": True,
+                "tool_choice": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get weather info",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"location": {"type": "string"}},
+                                "required": ["location"],
+                            },
+                        },
+                    }
+                ],
+            },
+        }
+
+        response = make_request(payload, stream=True)
+        assert response.status_code == 200
+
+        tool_call_packets = []
+        choices_indices_checked = False
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            line_text = line.decode("utf-8")
+            if not line_text.startswith("data:"):
+                continue
+            json_str = line_text[5:].strip()
+            if json_str == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(json_str)
+                output = chunk.get("output", {})
+                choices = output.get("choices", [])
+
+                if not choices:
+                    continue
+
+                # --- 新增校验: 针对 1.16 问题 1 ---
+                # 验证 choices 列表项中是否存在 index 字段
+                assert (
+                    "index" in choices[0]
+                ), f"❌ Missing 'index' field in choices[0]. Chunk: {json_str}"
+                assert (
+                    choices[0]["index"] == 0
+                ), f"❌ Expected choices[0]['index'] == 0, got {choices[0].get('index')}"
+                choices_indices_checked = True
+                # --------------------------------
+
+                msg = choices[0].get("message", {})
+                if "tool_calls" in msg:
+                    for tc in msg["tool_calls"]:
+                        tool_call_packets.append(tc)
+            except json.JSONDecodeError:
+                continue
+            except AssertionError as e:
+                pytest.fail(str(e))
+
+        assert (
+            choices_indices_checked
+        ), "Stream did not return any valid choices packets to verify index."
+        assert len(tool_call_packets) > 0, "No tool calls generated in stream"
+
+        first_packet = tool_call_packets[0]
+
+        # 验证第一包 tool_calls
+        assert "index" in first_packet
+        assert first_packet.get("type") == "function"
+        assert first_packet.get("id") != "", "First packet must have a valid ID"
+
+        # 验证后续包 (针对 1.16 问题 2)
+        if len(tool_call_packets) > 1:
+            second_packet = tool_call_packets[1]
+            assert "index" in second_packet
+            assert second_packet.get("type") == "function"
+            assert "id" in second_packet, "Subsequent packets must contain 'id' key"
+            assert (
+                second_packet["id"] == ""
+            ), f"Subsequent packets ID must be empty string, got: '{second_packet['id']}'"
+
+    def test_dash_sync_tool_call_index_presence(self):
+        """
+        验证 DashScope 同步请求 (incremental_output=False) 下:
+        output.choices[0].message.tool_calls[0] 必须包含 'index' 字段
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {
+                "messages": [{"role": "user", "content": "Check weather in Beijing"}]
+            },
+            "parameters": {
+                "incremental_output": False,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "weather_check",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+            },
+        }
+
+        response = make_request(payload, stream=False)
+        assert response.status_code == 200
+
+        data = response.json()
+        choices = data.get("output", {}).get("choices", [])
+        assert len(choices) > 0
+
+        msg = choices[0].get("message", {})
+        tool_calls = msg.get("tool_calls", [])
+
+        assert len(tool_calls) > 0, "Expected tool calls in sync response"
+
+        # 核心验证
+        assert (
+            "index" in tool_calls[0]
+        ), "Missing 'index' in synchronous tool_calls response"
+        assert tool_calls[0]["index"] == 0
