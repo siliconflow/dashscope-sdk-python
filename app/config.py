@@ -1,6 +1,7 @@
 import os
 import logging
 from typing import Dict, Any
+import httpx
 
 # Base URL configuration
 SILICON_FLOW_BASE_URL = os.getenv(
@@ -29,8 +30,14 @@ TIMEOUT_CONFIG = {
     "connect": 10.0,
     "read": 7200.0,  # 2 hours
     "write": 600.0,
-    "pool": 10.0,
+    "pool": 60.0,
 }
+
+HTTPX_LIMITS = httpx.Limits(
+    max_connections=1000,
+    max_keepalive_connections=200,
+    keepalive_expiry=60.0,
+)
 
 # Server configuration
 SERVER_CONFIG = {"host": "0.0.0.0", "port": 8000, "access_log": True}

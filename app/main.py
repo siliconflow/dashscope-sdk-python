@@ -25,6 +25,7 @@ from app.config import (
     DUMMY_KEY,
     MAX_NUM_MSG_CURL_DUMP,
     TIMEOUT_CONFIG,
+    HTTPX_LIMITS,
     SERVER_CONFIG,
 )
 
@@ -161,7 +162,11 @@ class DeepSeekProxy:
         kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
-            timeout=httpx.Timeout(**TIMEOUT_CONFIG),
+            http_client=httpx.AsyncClient(
+                limits=HTTPX_LIMITS,
+                timeout=httpx.Timeout(**TIMEOUT_CONFIG),
+                headers=extra_headers,
+            ),
             default_headers=extra_headers,
             **kv,
         )
