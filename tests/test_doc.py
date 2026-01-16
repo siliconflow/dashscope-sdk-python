@@ -716,7 +716,7 @@ class TestFunctionalFixes:
     def test_r1_conflict_partial_and_thinking_strict(self):
         """
         Scenario: R1 Model provided with both partial (prefix) and enable_thinking.
-        Expectation: Strict 400 Error (R1 does not support prefix completion with thinking).
+        Expectation: Strict 400 Error.
         """
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
@@ -729,8 +729,49 @@ class TestFunctionalFixes:
             "parameters": {"enable_thinking": True},
         }
         response = make_request(payload)
+        assert_exact_error(
+            response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
+        )
 
-        # 验证 R1 必须报错
+    def test_v3_base_ignore_conflict_success(self):
+        """
+        Scenario: V3 (Base) Model provided with both partial and enable_thinking.
+        Expectation: Return 200 OK (Compatibility mode: ignores thinking).
+        """
+        # 注意：这里特指 deepseek-v3，不包含 .1 或 .2
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                ]
+            },
+            "parameters": {"enable_thinking": True},
+        }
+
+        response = make_request(payload)
+        assert (
+            response.status_code == 200
+        ), f"V3 Base should handle partial+thinking gracefully. Got: {response.text}"
+
+    def test_v3_2_conflict_strict_error(self):
+        """
+        Scenario: V3.2 Model provided with both partial and enable_thinking.
+        Expectation: Strict 400 Error (Unlike V3 Base).
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                ]
+            },
+            "parameters": {"enable_thinking": True},
+        }
+
+        response = make_request(payload)
         assert_exact_error(
             response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
         )
