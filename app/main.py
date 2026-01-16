@@ -926,7 +926,12 @@ class DeepSeekProxy:
             "reasoning_content": getattr(msg, "reasoning_content", ""),
         }
         if msg.tool_calls:
-            message_body["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
+            tool_calls_list = []
+            for idx, tc in enumerate(msg.tool_calls):
+                tc_dict = tc.model_dump()
+                tc_dict["index"] = idx
+                tool_calls_list.append(tc_dict)
+            message_body["tool_calls"] = tool_calls_list
 
         response_body = {
             "output": {
