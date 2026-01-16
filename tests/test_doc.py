@@ -778,15 +778,15 @@ class TestFunctionalFixes:
 
     # --- 在 TestFunctionalFixes 类中添加 ---
 
+    # 1. 修改原有的 Success 用例
+    # 原用例使用了 v3.2，现在必须改为 "pre-siliconflow/deepseek-v3" 才能预期返回 200
     def test_v3_ignore_conflict_partial_and_thinking_success(self):
         """
-        Scenario: V3.2 Model provided with both partial (prefix) and enable_thinking.
-        Expectation: Return 200 OK.
-        The system should ignore the conflict (or ignore the thinking param) and
-        process the request normally instead of throwing a 400 error.
+        Scenario: V3 (Base) Model provided with both partial and enable_thinking.
+        Expectation: Return 200 OK (Compatibility mode: ignores thinking).
         """
         payload = {
-            "model": "pre-siliconflow/deepseek-v3.2",
+            "model": "pre-siliconflow/deepseek-v3",  # <--- 关键修改：改为 V3
             "input": {
                 "messages": [
                     {"role": "user", "content": "你好"},
@@ -797,20 +797,30 @@ class TestFunctionalFixes:
         }
 
         response = make_request(payload)
-
-        # 验证 V3 必须成功返回 200，而不是 400
+        # 验证 V3 忽略参数冲突，正常返回 200
         assert (
             response.status_code == 200
-        ), f"V3 should handle partial+thinking gracefully. Got: {response.text}"
+        ), f"V3 Base should return 200. Got: {response.text}"
 
-        # 额外验证：确保返回的内容没有包含报错信息的 JSON 文本
-        try:
-            # 如果是流式，检查第一行是否不是报错
-            if response.encoding is None:
-                response.encoding = "utf-8"
+    # 2. 新增 V3.2 的报错测试用例
+    def test_v3_2_conflict_strict_error(self):
+        """
+        Scenario: V3.2 Model provided with both partial and enable_thinking.
+        Expectation: Strict 400 Error.
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",  # <--- V3.2 必须报错
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                ]
+            },
+            "parameters": {"enable_thinking": True},
+        }
 
-            first_line = next(response.iter_lines()).decode("utf-8")
-            # 简单的非报错检查 (正常流式通常以 data: 开头，或者是 {"output":...} 如果是非流式)
-            assert "InvalidParameter" not in first_line
-        except StopIteration:
-            pass  # 空响应在 status_code 检查时已捕获
+        response = make_request(payload)
+        # 验证 V3.2 返回 InvalidParameter 错误
+        assert_exact_error(
+            response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
+        )
