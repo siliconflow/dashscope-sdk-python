@@ -29,10 +29,8 @@ from app.config import (
     SERVER_CONFIG,
 )
 
-# Define context variable for request ID tracking
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
-# Apply the logging configuration
 logging.config.dictConfig(get_logging_config(request_id_ctx))
 logger = logging.getLogger("DeepSeekProxy")
 
@@ -68,7 +66,6 @@ class ServerState:
     def __init__(self):
         self.active_requests: int = 0
         self._lock: Optional[asyncio.Lock] = None
-        # 这是核心：全局共享的 HTTP 客户端
         self.shared_client: Optional[httpx.AsyncClient] = None
 
     @classmethod
@@ -79,7 +76,6 @@ class ServerState:
 
     @property
     def lock(self) -> asyncio.Lock:
-        """Lazy initialization of the lock to ensure it attaches to the running loop."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
@@ -105,7 +101,6 @@ class ServerState:
             self.active_requests -= 1
 
     async def get_snapshot(self) -> Dict[str, Any]:
-        """Async safe snapshot retrieval."""
         async with self.lock:
             return {
                 "active_requests": self.active_requests,
@@ -179,7 +174,7 @@ class DeepSeekProxy:
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
             api_key=actual_key,
-            http_client=shared_http_client,  # 指向全局连接池
+            http_client=shared_http_client,
             default_headers=headers,
         )
 
@@ -440,14 +435,11 @@ class DeepSeekProxy:
         target_model = model_spec.real_model_name
         messages = self._convert_input_to_messages(req_data.input)
 
-        # 【修改开始】处理 Partial 与 Enable Thinking 的冲突逻辑
         has_partial = any(msg.get("partial") for msg in messages)
 
         if has_partial and params.enable_thinking:
-            # 获取原始请求模型名称的小写，用于判断具体版本
             raw_model_lower = req_data.model.lower()
 
-            # 定义需要严格报错的模型集合：R1 (Reasoning), V3.1, V3.2
             is_strict_model = (
                 model_spec.is_reasoning
                 or "v3.1" in raw_model_lower
@@ -464,14 +456,10 @@ class DeepSeekProxy:
                     },
                 )
 
-            # V3 (Base) 兼容逻辑：
-            # 如果是 V3 且同时传了这两项，自动把 enable_thinking 关掉，按正常前缀续写返回 200
             params.enable_thinking = False
 
-        # R1 模型始终清理 flag 以防上游冲突 (兜底防御)
         if model_spec.is_reasoning:
             params.enable_thinking = False
-        # 【修改结束】
 
         should_stream = (
             params.incremental_output or params.enable_thinking or force_stream
@@ -761,7 +749,6 @@ class DeepSeekProxy:
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
-                    # 修复：OpenAI 流式后续包 type 为 None，但 DashScope 协议要求每包都必须带 type="function"
                     current_tool_calls_payload = []
                     for tc in delta.tool_calls:
                         tc_dict = tc.model_dump()
@@ -769,7 +756,6 @@ class DeepSeekProxy:
                             tc_dict["type"] = "function"
                         current_tool_calls_payload.append(tc_dict)
 
-                # 下面是原有的 accumulation 逻辑，保持不变
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in accumulated_tool_calls:
@@ -995,7 +981,6 @@ async def lifespan(app: FastAPI):
 def _prepare_proxy_and_headers(
     request: Request, authorization: Optional[str]
 ) -> tuple[DeepSeekProxy, str]:
-    # Get the request ID from ContextVar (already set in middleware)
     request_id = request_id_ctx.get()
     api_key = DUMMY_KEY
 
@@ -1181,13 +1166,11 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_tracker(request: Request, call_next):
-        # 1. Try to get Trace ID from headers, or generate a new one
         req_id = request.headers.get(
             "x-request-id",
             request.headers.get("X-SiliconCloud-Trace-Id", str(uuid.uuid4())),
         )
 
-        # 2. Set ContextVar for request ID tracking
         token = request_id_ctx.set(req_id)
 
         await SERVER_STATE.increment_request()
@@ -1196,20 +1179,17 @@ def create_app() -> FastAPI:
         try:
             response = await call_next(request)
 
-            # 3. Add Trace ID to response headers for client troubleshooting
             response.headers["X-Request-Id"] = req_id
             return response
         finally:
             await SERVER_STATE.decrement_request()
             duration = (time.time() - start_time) * 1000
 
-            # Log slow requests (logger will automatically include req_id)
             if duration > 1000:
                 logger.warning(
                     f"{request.method} {request.url.path} - SLOW {duration:.2f}ms"
                 )
 
-            # 4. Clean up ContextVar to prevent contamination of other requests
             request_id_ctx.reset(token)
 
     @app.get("/health_check")
@@ -1295,5 +1275,4 @@ def create_app() -> FastAPI:
 app = create_app()
 
 if __name__ == "__main__":
-    # 本地直接运行 python main.py 时的入口
     uvicorn.run(app, **SERVER_CONFIG)
