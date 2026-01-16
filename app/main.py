@@ -440,24 +440,35 @@ class DeepSeekProxy:
         target_model = model_spec.real_model_name
         messages = self._convert_input_to_messages(req_data.input)
 
-        # 【修改开始】
+        # 【修改开始】处理 Partial 与 Enable Thinking 的冲突逻辑
         has_partial = any(msg.get("partial") for msg in messages)
 
-        # 1. R1 模型 (Reasoning): 严格禁止 Partial (因为内置推理与 prefill 冲突)，必须报错
-        if has_partial and model_spec.is_reasoning:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "code": "InvalidParameter",
-                    "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
-                },
+        if has_partial and params.enable_thinking:
+            # 获取原始请求模型名称的小写，用于判断具体版本
+            raw_model_lower = req_data.model.lower()
+
+            # 定义需要严格报错的模型集合：R1 (Reasoning), V3.1, V3.2
+            is_strict_model = (
+                model_spec.is_reasoning
+                or "v3.1" in raw_model_lower
+                or "v3.2" in raw_model_lower
             )
 
-        # 2. V3 模型: 如果有 Partial 且 enable_thinking=True，为了兼容性(Test3)自动关闭 Thinking 并不报错
-        if has_partial and params.enable_thinking:
+            if is_strict_model:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "code": "InvalidParameter",
+                        "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
+                        "request_id": initial_request_id,
+                    },
+                )
+
+            # V3 (Base) 兼容逻辑：
+            # 如果是 V3 且同时传了这两项，自动把 enable_thinking 关掉，按正常前缀续写返回 200
             params.enable_thinking = False
 
-        # R1 模型始终清理 flag 以防上游冲突
+        # R1 模型始终清理 flag 以防上游冲突 (兜底防御)
         if model_spec.is_reasoning:
             params.enable_thinking = False
         # 【修改结束】
