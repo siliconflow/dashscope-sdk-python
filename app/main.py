@@ -417,7 +417,7 @@ class DeepSeekProxy:
                 status_code=400,
                 content={
                     "code": "InvalidParameter",
-                    "message": '<400> InternalError.Algo.InvalidParameter: Input should be a valid string: parameters.tool_choice.str & Field required: parameters.tool_choice.ToolChoice.function',
+                    "message": "<400> InternalError.Algo.InvalidParameter: Input should be a valid string: parameters.tool_choice.str & Field required: parameters.tool_choice.ToolChoice.function",
                 },
             )
 
@@ -742,9 +742,15 @@ class DeepSeekProxy:
             current_tool_calls_payload = None
             if delta and delta.tool_calls:
                 if is_incremental:
-                    current_tool_calls_payload = [
-                        tc.model_dump() for tc in delta.tool_calls
-                    ]
+                    # 修复：OpenAI 流式后续包 type 为 None，但 DashScope 协议要求每包都必须带 type="function"
+                    current_tool_calls_payload = []
+                    for tc in delta.tool_calls:
+                        tc_dict = tc.model_dump()
+                        if tc_dict.get("type") is None:
+                            tc_dict["type"] = "function"
+                        current_tool_calls_payload.append(tc_dict)
+
+                # 下面是原有的 accumulation 逻辑，保持不变
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in accumulated_tool_calls:
