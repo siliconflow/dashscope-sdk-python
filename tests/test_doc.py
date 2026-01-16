@@ -423,3 +423,79 @@ class TestFunctionalFixes:
 
         # 验证是否返回了预期的参数校验错误
         assert_exact_error(response, "InvalidParameter", ERR_MSG_TOOL_CHOICE)
+
+    def test_tool_call_index_field_presence(self):
+        """
+        Verify that tool_calls objects in the response contain the 'index' field.
+        This addresses the regression where 'index': 0 was missing.
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {
+                "messages": [
+                    {"role": "system", "content": "You are a translation helper."},
+                    {"role": "user", "content": "Please translate 'Hello' to Spanish using the tool."}
+                ]
+            },
+            "parameters": {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "translationTool",
+                            "description": "Translate text",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "translation": {
+                                        "description": "The translated text",
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["translation"]
+                            }
+                        }
+                    }
+                ],
+                "tool_choice": "required",
+                # Important: Use non-streaming to check the final full object structure easily,
+                # or stream and reconstruct. The curl example used non-streaming (default).
+                # We will check the non-streaming response body.
+                "incremental_output": False
+            }
+        }
+
+        # Force non-streaming request to inspect the final message object directly
+        response = make_request(payload, stream=False)
+        assert response.status_code == 200, f"Request failed: {response.text}"
+
+        data = response.json()
+
+        # Navigate to the tool_calls
+        # Note: The response structure depends on the gateway.
+        # Based on the user's curl output: root -> choices -> [0] -> message -> tool_calls -> [0]
+        # Based on SiliconFlow/DashScope typically: output -> choices -> ...
+
+        # We will handle the standard DashScope structure which puts result in 'output'
+        # or the OpenAI compatible structure. The user's example shows OpenAI format ("choices" at root).
+        # Our helper 'make_request' calls the SiliconFlow endpoint.
+
+        # If the API returns standard OpenAI format:
+        if "choices" in data:
+            choices = data["choices"]
+        elif "output" in data and "choices" in data["output"]:
+            choices = data["output"]["choices"]
+        else:
+            pytest.fail(f"Unexpected response structure: {data.keys()}")
+
+        assert len(choices) > 0, "No choices returned"
+        message = choices[0].get("message", {})
+        tool_calls = message.get("tool_calls", [])
+
+        assert len(tool_calls) > 0, "Expected tool calls but got none"
+
+        first_tool_call = tool_calls[0]
+
+        # THE ASSERTION
+        assert "index" in first_tool_call, f"Missing 'index' field in tool_call object: {first_tool_call}"
+        assert first_tool_call["index"] == 0, f"Expected index 0, got {first_tool_call.get('index')}"
