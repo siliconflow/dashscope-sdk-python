@@ -421,10 +421,6 @@ class DeepSeekProxy:
                 },
             )
 
-        # 【删除或注释掉这段旧代码】因为过早重置会导致无法检测 R1 的冲突
-        # if model_spec.is_reasoning and params.enable_thinking:
-        #    params.enable_thinking = False
-
         proxy_stop_list: List[str] = []
         if params.stop:
             if isinstance(params.stop, str):
