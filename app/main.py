@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict, ValidationError
 from openai import AsyncOpenAI, APIError, RateLimitError, AuthenticationError
 
-from config import (
+from app.config import (
     get_logging_config,
     SILICON_FLOW_BASE_URL,
     MODEL_MAPPING,
@@ -421,8 +421,9 @@ class DeepSeekProxy:
                 },
             )
 
-        if model_spec.is_reasoning and params.enable_thinking:
-            params.enable_thinking = False
+        # 【删除或注释掉这段旧代码】因为过早重置会导致无法检测 R1 的冲突
+        # if model_spec.is_reasoning and params.enable_thinking:
+        #    params.enable_thinking = False
 
         proxy_stop_list: List[str] = []
         if params.stop:
@@ -443,9 +444,13 @@ class DeepSeekProxy:
         target_model = model_spec.real_model_name
         messages = self._convert_input_to_messages(req_data.input)
 
+        # 【修改开始】针对 R1 和 V3 对 partial + enable_thinking 的不同处理逻辑
         if params.enable_thinking:
-            for msg in messages:
-                if msg.get("partial"):
+            has_partial = any(msg.get("partial") for msg in messages)
+
+            if has_partial:
+                if model_spec.is_reasoning:
+                    # 场景 1 (Test 1): R1 模型 + Thinking + Partial -> 严格报错
                     return JSONResponse(
                         status_code=400,
                         content={
@@ -453,6 +458,17 @@ class DeepSeekProxy:
                             "message": "<400> InternalError.Algo.InvalidParameter: Partial mode is not supported when enable_thinking is true",
                         },
                     )
+                else:
+                    # 场景 2 (Test 2): V3 模型 + Thinking + Partial -> 兼容模式
+                    # 既然使用了 partial，就静默强制关闭 thinking，让请求成功
+                    params.enable_thinking = False
+                    logger.debug(f"Model {req_data.model} ignores enable_thinking due to partial mode.")
+
+            # 只有在检查完 partial 冲突后，如果是 R1 模型，才为了上游兼容性把 flag 关掉
+            # (因为 R1 默认就在思考，通常不需要显式传 enable_thinking)
+            if model_spec.is_reasoning:
+                params.enable_thinking = False
+        # 【修改结束】
 
         should_stream = (
             params.incremental_output or params.enable_thinking or force_stream
