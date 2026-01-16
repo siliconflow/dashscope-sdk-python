@@ -356,3 +356,34 @@ def test_incremental_output_true_contrast():
     frames = list(parse_sse_stream(response))
     assert len(frames) > 0
     assert_stream_deltas(frames, check_reasoning=True)
+
+
+# --- SUITE E: BASIC GENERATION PARAMETERS ---
+
+
+def test_deepseek_v3_with_temperature_and_logit_bias():
+    """
+    Test DeepSeek-V3 model with temperature and logit_bias parameters.
+    Validates that advanced generation parameters are properly handled.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "deepseek-ai/DeepSeek-V3",
+        "input": {"prompt": "Hello"},
+        "parameters": {
+            "temperature": 0.7,
+            "logit_bias": {"12345": 5.0, "67890": -100.0},
+        },
+    }
+
+    response = requests.post(GATEWAY_URL, headers=headers, json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert "output" in data
+    assert "choices" in data["output"]
+    assert len(data["output"]["choices"]) > 0
+
+    choice = data["output"]["choices"][0]
+    assert "text" in choice or "message" in choice
+    assert "usage" in data
