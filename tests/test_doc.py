@@ -499,3 +499,125 @@ class TestFunctionalFixes:
         # THE ASSERTION
         assert "index" in first_tool_call, f"Missing 'index' field in tool_call object: {first_tool_call}"
         assert first_tool_call["index"] == 0, f"Expected index 0, got {first_tool_call.get('index')}"
+
+
+    def test_dashscope_stream_tool_calls_type_presence(self):
+        """
+        验证 DashScope 流式协议（incremental_output=True）下，
+        tool_calls 返回的每一包数据（不仅是第一包）都包含 'type' 字段。
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "What is the weather like in Boston?"}
+                ]
+            },
+            "parameters": {
+                "incremental_output": True,
+                "result_format": "message",
+                "tool_choice": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather in a given location",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city and state, e.g. San Francisco, CA"
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": ["celsius", "fahrenheit"]
+                                    }
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_time",
+                            "description": "Get the current time in a given location",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city and state, e.g. San Francisco, CA"
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": []
+                                    }
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+
+        response = make_request(payload, stream=True)
+        assert response.status_code == 200, f"Request failed: {response.text}"
+
+        packet_count_with_tool_calls = 0
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            line_text = line.decode("utf-8")
+            if not line_text.startswith("data:"):
+                continue
+
+            json_str = line_text[5:].strip()
+            if json_str == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(json_str)
+
+                # 适配 DashScope 结构: output -> choices -> message -> tool_calls
+                # 注意：流式返回中，DashScope 结构通常在 output 下
+                output = chunk.get("output", {})
+                choices = output.get("choices", [])
+
+                if not choices:
+                    continue
+
+                message = choices[0].get("message", {})
+
+                # 检查是否存在 tool_calls
+                if "tool_calls" in message:
+                    tool_calls = message["tool_calls"]
+
+                    # 遍历该包中的所有 tool_call
+                    for tc in tool_calls:
+                        packet_count_with_tool_calls += 1
+
+                        # --- 核心断言 ---
+                        # 验证每一包 tool_call 都必须包含 'type' 字段
+                        assert "type" in tc, (
+                            f"Missing 'type' field in tool_call packet.\n"
+                            f"Full Chunk: {json_str}"
+                        )
+                        assert tc["type"] == "function", (
+                            f"Invalid 'type' value: {tc.get('type')}\n"
+                            f"Full Chunk: {json_str}"
+                        )
+
+                        # 顺便验证 index 字段 (通常也需要)
+                        assert "index" in tc, f"Missing 'index' field in tool_call packet: {json_str}"
+
+            except json.JSONDecodeError:
+                continue
+
+        # 确保确实触发了工具调用，否则测试没有实际意义
+        assert packet_count_with_tool_calls > 0, "No tool calls were returned in the stream, test inconclusive."
