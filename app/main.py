@@ -68,6 +68,8 @@ class ServerState:
     def __init__(self):
         self.active_requests: int = 0
         self._lock: Optional[asyncio.Lock] = None
+        # 这是核心：全局共享的 HTTP 客户端
+        self.shared_client: Optional[httpx.AsyncClient] = None
 
     @classmethod
     def get_instance(cls):
@@ -81,6 +83,18 @@ class ServerState:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def init_shared_client(self):
+        if self.shared_client is None:
+            self.shared_client = httpx.AsyncClient(
+                limits=HTTPX_LIMITS,
+                timeout=httpx.Timeout(**TIMEOUT_CONFIG),
+            )
+
+    async def close_shared_client(self):
+        if self.shared_client:
+            await self.shared_client.aclose()
+            self.shared_client = None
 
     async def increment_request(self):
         async with self.lock:
@@ -153,22 +167,19 @@ class GenerationRequest(BaseModel):
 
 
 class DeepSeekProxy:
-    def __init__(self, api_key: str, extra_headers: Optional[Dict[str, str]] = None):
-        if extra_headers is None:
-            extra_headers = {}
-        if "x-api-key" in extra_headers and extra_headers["x-api-key"]:
-            api_key = extra_headers["x-api-key"]
-
-        kv = {"api_key": api_key} if api_key != DUMMY_KEY else {}
+    def __init__(
+        self,
+        api_key: str,
+        shared_http_client: httpx.AsyncClient,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ):
+        headers = extra_headers.copy() if extra_headers else {}
+        actual_key = api_key if api_key != DUMMY_KEY else "dummy_key"
         self.client = AsyncOpenAI(
             base_url=SILICON_FLOW_BASE_URL,
-            http_client=httpx.AsyncClient(
-                limits=HTTPX_LIMITS,
-                timeout=httpx.Timeout(**TIMEOUT_CONFIG),
-                headers=extra_headers,
-            ),
-            default_headers=extra_headers,
-            **kv,
+            api_key=actual_key,
+            http_client=shared_http_client,  # 指向全局连接池
+            default_headers=headers,
         )
 
     def _get_mapped_model(self, request_model: str) -> str:
@@ -928,6 +939,8 @@ class DeepSeekProxy:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    SERVER_STATE.init_shared_client()
+
     async def epoch_clock():
         while True:
             await asyncio.sleep(5)
@@ -938,6 +951,7 @@ async def lifespan(app: FastAPI):
     monitor_task = asyncio.create_task(epoch_clock())
     yield
     monitor_task.cancel()
+    await SERVER_STATE.close_shared_client()
     try:
         await monitor_task
     except asyncio.CancelledError:
@@ -987,7 +1001,11 @@ def _prepare_proxy_and_headers(
         k: v for k, v in request.headers.items() if k.lower() not in unsafe_headers
     }
 
-    proxy = DeepSeekProxy(api_key=api_key, extra_headers=forward_headers)
+    proxy = DeepSeekProxy(
+        api_key=api_key,
+        shared_http_client=SERVER_STATE.shared_client,
+        extra_headers=forward_headers,
+    )
     return proxy, request_id
 
 
