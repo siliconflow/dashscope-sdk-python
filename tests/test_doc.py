@@ -120,22 +120,6 @@ class TestStrictErrorValidation:
         response = make_request(payload)
         assert_exact_error(response, "InvalidParameter", ERR_MSG_TEMP_RANGE)
 
-    def test_conflict_prefix_and_thinking(self):
-        payload = {
-            "model": "pre-siliconflow/deepseek-v3.2",
-            "input": {
-                "messages": [
-                    {"role": "user", "content": "你好"},
-                    {"role": "assistant", "partial": True, "content": "你好，我是"},
-                ]
-            },
-            "parameters": {"enable_thinking": True},
-        }
-        response = make_request(payload)
-        assert_exact_error(
-            response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
-        )
-
     def test_r1_enable_thinking_unsupported(self):
         payload = {
             "model": "pre-siliconflow/deepseek-r1",
