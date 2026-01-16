@@ -627,3 +627,104 @@ class TestFunctionalFixes:
         assert (
             packet_count_with_tool_calls > 0
         ), "No tool calls were returned in the stream, test inconclusive."
+
+    def test_dash_sync_sql_tool_call_index_presence(self):
+        """
+        Scenario based on the provided curl command:
+        - Model: pre-siliconflow/deepseek-v3.1
+        - Mode: DashScope Synchronous (Non-streaming)
+        - Context: SQL Tool scenario
+        - Requirement: output.choices[0].message.tool_calls[0] must contain 'index' field.
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.1",
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Which sales agent made the most in sales in 2009?",
+                    },
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "arguments": "{}",
+                                    "name": "sql_db_list_tables",
+                                },
+                                "id": "tool_abcd123",
+                                "type": "function",
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "content": "Album, Artist, Customer, Employee, Genre, Invoice, InvoiceLine, MediaType, Playlist, PlaylistTrack, Track",
+                        "tool_call_id": "tool_abcd123",
+                    },
+                ]
+            },
+            "parameters": {
+                "incremental_output": False,  # Key: Synchronous request
+                "n": 1,
+                "result_format": "message",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "sql_db_schema",
+                            "description": "Input to this tool is a comma-separated list of tables, output is the schema and sample rows for those tables. Be sure that the tables actually exist by calling sql_db_list_tables first! Example Input: table1, table2, table3",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "table_names": {
+                                        "description": "A comma-separated list of the table names for which to return the schema. Example input: 'table1, table2, table3'",
+                                        "type": "string",
+                                    }
+                                },
+                                "required": ["table_names"],
+                            },
+                        },
+                    }
+                ],
+            },
+        }
+
+        # 1. 发送非流式请求
+        response = make_request(payload, stream=False)
+        assert response.status_code == 200, f"Request failed: {response.text}"
+
+        # 2. 解析响应
+        data = response.json()
+
+        # 兼容不同的 Response 根节点结构 (Direct 'choices' or 'output.choices')
+        if "output" in data and "choices" in data["output"]:
+            choices = data["output"]["choices"]
+        elif "choices" in data:
+            choices = data["choices"]
+        else:
+            pytest.fail(f"Unexpected response structure: {data.keys()}")
+
+        assert len(choices) > 0, "No choices returned"
+
+        # 3. 定位 tool_calls
+        message = choices[0].get("message", {})
+        tool_calls = message.get("tool_calls", [])
+
+        assert (
+            len(tool_calls) > 0
+        ), "Expected model to generate a tool_call (sql_db_schema) but got none."
+
+        # 4. 核心断言：检查 index 字段是否存在
+        first_tool_call = tool_calls[0]
+        print(f"\n[DEBUG] Tool Call Received: {json.dumps(first_tool_call, indent=2)}")
+
+        assert "index" in first_tool_call, (
+            f"❌ Critical Failure: 'index' field missing in tool_calls[0] for Dash Synchronous request.\n"
+            f"Received: {first_tool_call}"
+        )
+
+        # 验证 index 值通常为 0 (对于单工具调用)
+        assert (
+            first_tool_call["index"] == 0
+        ), f"Expected index 0, got {first_tool_call.get('index')}"
