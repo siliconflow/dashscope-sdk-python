@@ -728,3 +728,64 @@ class TestFunctionalFixes:
         assert (
             first_tool_call["index"] == 0
         ), f"Expected index 0, got {first_tool_call.get('index')}"
+
+    def test_r1_conflict_partial_and_thinking_strict(self):
+        """
+        Scenario: R1 Model provided with both partial (prefix) and enable_thinking.
+        Expectation: Strict 400 Error (R1 does not support prefix completion with thinking).
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-r1",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                ]
+            },
+            "parameters": {"enable_thinking": True},
+        }
+        response = make_request(payload)
+
+        # 验证 R1 必须报错
+        assert_exact_error(
+            response, "InvalidParameter", ERR_MSG_PARTIAL_THINKING_CONFLICT
+        )
+
+    # --- 在 TestFunctionalFixes 类中添加 ---
+
+    def test_v3_ignore_conflict_partial_and_thinking_success(self):
+        """
+        Scenario: V3.2 Model provided with both partial (prefix) and enable_thinking.
+        Expectation: Return 200 OK.
+        The system should ignore the conflict (or ignore the thinking param) and
+        process the request normally instead of throwing a 400 error.
+        """
+        payload = {
+            "model": "pre-siliconflow/deepseek-v3.2",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "partial": True, "content": "你好，我是"},
+                ]
+            },
+            "parameters": {"enable_thinking": True},
+        }
+
+        response = make_request(payload)
+
+        # 验证 V3 必须成功返回 200，而不是 400
+        assert (
+            response.status_code == 200
+        ), f"V3 should handle partial+thinking gracefully. Got: {response.text}"
+
+        # 额外验证：确保返回的内容没有包含报错信息的 JSON 文本
+        try:
+            # 如果是流式，检查第一行是否不是报错
+            if response.encoding is None:
+                response.encoding = "utf-8"
+
+            first_line = next(response.iter_lines()).decode("utf-8")
+            # 简单的非报错检查 (正常流式通常以 data: 开头，或者是 {"output":...} 如果是非流式)
+            assert "InvalidParameter" not in first_line
+        except StopIteration:
+            pass  # 空响应在 status_code 检查时已捕获
